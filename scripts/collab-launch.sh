@@ -24,6 +24,11 @@ echo -e "  ${BD}${W}◈ ensemble collab${R}"
 echo -e "  ${D}${TASK:0:80}${R}"
 echo ""
 
+# ─── 0. Mark tmux window as running ───
+if [ -n "${TMUX:-}" ]; then
+  tmux rename-window "⏳ collab" 2>/dev/null || true
+fi
+
 # ─── 1. Server ───
 if curl -sf "$API/api/v1/health" > /dev/null 2>&1; then
   echo -e "  ${CHECK} Server running"

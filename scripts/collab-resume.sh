@@ -31,6 +31,10 @@ if active:
   fi
 fi
 
+if [ -n "${TMUX:-}" ]; then
+  tmux rename-window "⏳ collab" 2>/dev/null || true
+fi
+
 echo -e "\n  ${BD}${W}◈ ensemble resume${R}"
 
 # ─── 2. Verify team exists and is active ───
