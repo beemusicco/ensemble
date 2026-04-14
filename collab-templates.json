@@ -59,6 +59,51 @@
           "focus": "Analyze the root cause of the bug. Read relevant code paths, trace the execution flow, identify where the logic breaks down. Propose and implement a fix once the reproducer confirms the bug."
         }
       ]
+    },
+    "adversarial": {
+      "name": "Adversarial Review",
+      "description": "One agent implements, the other tries to break it with edge case tests.",
+      "suggestedTaskPrefix": "Implement and stress-test:",
+      "roles": [
+        {
+          "role": "BUILDER",
+          "focus": "Implement the requested change. Write clean, correct code. After the adversary finds issues, fix them and explain your fix. Your goal: code that survives all attacks."
+        },
+        {
+          "role": "ADVERSARY",
+          "focus": "Your ONLY job is to find bugs, edge cases, and failures. Write tests that break the builder's code. Check race conditions, boundary values, error handling, security. Never approve until you've tried at least 10 attack vectors. Be ruthless."
+        }
+      ]
+    },
+    "crypto-strategy": {
+      "name": "Crypto Strategy Development",
+      "description": "One agent designs strategy logic, the other backtests and validates edge.",
+      "suggestedTaskPrefix": "Develop and validate crypto strategy:",
+      "roles": [
+        {
+          "role": "QUANT",
+          "focus": "Design the strategy: entry/exit logic, indicators, parameters. Read existing strategies in scripts/paper/strategies/ for patterns. Define clear hypothesis and expected edge. Share design before implementation."
+        },
+        {
+          "role": "VALIDATOR",
+          "focus": "Backtest the quant's strategy. Run scripts/backtest/test_correctness.py. Check for overfitting, survivorship bias, fee assumptions. Challenge every assumption. Only approve if Sharpe > 1.0 and profit factor > 1.2 on out-of-sample data."
+        }
+      ]
+    },
+    "deep-research": {
+      "name": "Deep Research with Convergence",
+      "description": "Two agents research independently then cross-validate. High-confidence findings = both agree.",
+      "suggestedTaskPrefix": "Deep research with cross-validation:",
+      "roles": [
+        {
+          "role": "RESEARCHER-PRIMARY",
+          "focus": "Research from primary sources: documentation, code, APIs, databases. Focus on FACTS and DATA. Share numbered findings. After comparing with secondary researcher, rate each finding: CONFIRMED (both found it), UNIQUE (only you found it), CONTRADICTED (disagreement)."
+        },
+        {
+          "role": "RESEARCHER-SECONDARY",
+          "focus": "Research from secondary sources: papers, forums, community, real-world examples. Focus on CONTEXT and PATTERNS. Share numbered findings. After comparing with primary researcher, challenge any finding that lacks evidence. Only CONFIRMED findings go into final report."
+        }
+      ]
     }
   }
 }

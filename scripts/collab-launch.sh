@@ -38,6 +38,25 @@ else
   fi
 fi
 
+# ─── 1b. Background cleanup of stale runtime dirs (>24h old) ───
+"$SCRIPT_DIR/collab-cleanup.sh" --force > /dev/null 2>&1 &
+
+# ─── 1c. Check for resumable active team on same CWD ───
+ACTIVE_TEAM=$(curl -sf "$API/api/ensemble/teams" 2>/dev/null | python3 -c "
+import json, sys, os
+cwd = os.path.realpath('$CWD')
+teams = json.load(sys.stdin).get('teams', [])
+active = [t for t in teams if t.get('status') == 'active' and t.get('workingDirectory') == cwd]
+if active:
+    active.sort(key=lambda t: t.get('createdAt', ''), reverse=True)
+    print(active[0]['id'])
+" 2>/dev/null || true)
+
+if [ -n "$ACTIVE_TEAM" ]; then
+  echo -e "  ${C}●${R} Active team found on same directory — resuming..."
+  exec "$SCRIPT_DIR/collab-resume.sh" "$ACTIVE_TEAM"
+fi
+
 # ─── 2. Create team (use env vars to avoid quoting hell) ───
 TEAM_NAME="collab-$(python3 -c 'import random,time; print(str(time.time_ns()//1000000)+"-"+str(random.randint(1000,9999)))')"
 PAYLOAD_FILE=$(mktemp)
@@ -54,13 +73,24 @@ else:
         {'program': 'codex', 'role': 'lead', 'hostId': os.environ['THOST']},
         {'program': 'claude code', 'role': 'worker', 'hostId': os.environ['THOST']}
     ]
-json.dump({
+import re
+desc = os.environ['TDESC'].lower()
+staged_patterns = [
+    r'\bimplement\b', r'\bdevelop\b', r'\bbuild\b', r'\bnaredi\b',
+    r'\bplan\b', r'\barhitektur', r'\bdesign\b', r'\bstress.?test\b',
+    r'\badversarial\b', r'\bimplement.*(?:and|in)\s+(?:test|review)\b',
+]
+staged = any(re.search(p, desc) for p in staged_patterns)
+payload = {
     'name': os.environ['TNAME'],
     'description': os.environ['TDESC'],
     'agents': agents,
     'feedMode': 'live',
-    'workingDirectory': os.environ['TCWD']
-}, open(os.environ['PFILE'], 'w'))
+    'workingDirectory': os.environ['TCWD'],
+}
+if staged:
+    payload['staged'] = True
+json.dump(payload, open(os.environ['PFILE'], 'w'))
 "
 RESULT=$(curl -sf -X POST "$API/api/ensemble/teams" \
   -H "Content-Type: application/json" \
@@ -84,13 +114,18 @@ printf '%s\n' "$TEAM_ID" > /tmp/collab-team-id.txt
 echo -e "  ${CHECK} Team created ${D}(${TEAM_NAME})${R}"
 
 # ─── 3. Bridge (writes its own PID file via single-instance guard) ───
-nohup "$SCRIPT_DIR/ensemble-bridge.sh" "$TEAM_ID" "$API" >> "$BRIDGE_LOG_FILE" 2>&1 &
+nohup "$SCRIPT_DIR/ensemble-bridge-supervisor.sh" "$TEAM_ID" "$API" >> "$BRIDGE_LOG_FILE" 2>&1 &
 echo -e "  ${CHECK} Bridge started"
 
 # ─── 4. Monitor ───
 MONITOR_CMD="cd '$REPO_DIR' && ./node_modules/.bin/tsx cli/monitor.ts $TEAM_ID"
 if [ -n "${TMUX:-}" ]; then
-  tmux split-window -h -l '40%' "$MONITOR_CMD"
+  SPAWN_PANE="${TMUX_PANE:-}"
+  if [ -n "$SPAWN_PANE" ]; then
+    tmux split-window -h -t "$SPAWN_PANE" -l '40%' "$MONITOR_CMD"
+  else
+    tmux split-window -h -l '40%' "$MONITOR_CMD"
+  fi
   echo -e "  ${CHECK} Monitor opened ${D}(right panel)${R}"
   MONITOR_MODE="split"
 else

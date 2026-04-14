@@ -8,6 +8,7 @@ export interface EnsembleTeam {
   createdAt: string
   completedAt?: string
   feedMode: 'silent' | 'summary' | 'live'
+  workingDirectory?: string
   result?: EnsembleTeamResult
 }
 

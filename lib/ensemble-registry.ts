@@ -114,6 +114,7 @@ export function createTeam(request: CreateTeamRequest): EnsembleTeam {
       createdBy: getCreatedBy(),
       createdAt: new Date().toISOString(),
       feedMode: request.feedMode || 'live',
+      workingDirectory: request.workingDirectory,
     }
     teams.push(team)
     writeTeamsFile(teams)
@@ -132,11 +133,47 @@ export function updateTeam(id: string, updates: Partial<EnsembleTeam>): Ensemble
   })
 }
 
+export function getActiveTeamsByWorkingDir(cwd: string): EnsembleTeam[] {
+  return loadTeams().filter(t => t.status === 'active' && t.workingDirectory === cwd)
+}
+
+function acquireMessageLock(file: string): () => void {
+  const lockDir = `${file}.lock`
+  const startedAt = Date.now()
+  for (;;) {
+    try {
+      fs.mkdirSync(lockDir)
+      return () => { try { fs.rmSync(lockDir, { recursive: true, force: true }) } catch { /* */ } }
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException
+      if (err.code !== 'EEXIST') throw error
+      try {
+        const stat = fs.statSync(lockDir)
+        if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
+          fs.rmSync(lockDir, { recursive: true, force: true })
+          continue
+        }
+      } catch { /* lock changed while checking; retry */ }
+      if (Date.now() - startedAt >= LOCK_TIMEOUT_MS) {
+        break
+      }
+      sleepSync(50)
+    }
+  }
+  return () => {}
+}
+
 export function appendMessage(teamId: string, message: EnsembleMessage): void {
   const dir = path.join(MESSAGES_DIR, teamId)
   ensureDir(dir)
   const file = path.join(dir, 'feed.jsonl')
-  fs.appendFileSync(file, JSON.stringify(message) + '\n')
+  const release = acquireMessageLock(file)
+  try {
+    const msg = message.timestamp ? message : { ...message, timestamp: new Date().toISOString() }
+    fs.appendFileSync(file, JSON.stringify(msg) + '\n')
+  } finally {
+    release()
+  }
 }
 
 export function getMessages(teamId: string, since?: string): EnsembleMessage[] {
@@ -152,7 +189,8 @@ export function getMessages(teamId: string, since?: string): EnsembleMessage[] {
     if (!fs.existsSync(file)) continue
     const lines = fs.readFileSync(file, 'utf-8').trim().split('\n').filter(Boolean)
     for (const line of lines) {
-      const msg = JSON.parse(line) as EnsembleMessage
+      let msg: EnsembleMessage
+      try { msg = JSON.parse(line) as EnsembleMessage } catch { continue }
       const dedupeKey = msg.id || `${msg.from}:${msg.timestamp}:${msg.content?.slice(0, 50)}`
       if (!seenIds.has(dedupeKey)) {
         seenIds.add(dedupeKey)
@@ -169,7 +207,7 @@ export function getMessages(teamId: string, since?: string): EnsembleMessage[] {
   })
 
   if (since) {
-    messages = messages.filter(m => m.timestamp && m.timestamp > since)
+    messages = messages.filter(m => m.timestamp && m.timestamp >= since)
   }
   return messages
 }

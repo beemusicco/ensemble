@@ -236,6 +236,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
       createTeam: vi.fn(),
       getTeam: vi.fn(() => team),
       saveTeams: vi.fn(),
+      getActiveTeamsByWorkingDir: vi.fn(() => []),
     }))
     vi.doMock('../lib/agent-spawner', () => ({
       spawnLocalAgent: vi.fn(),
@@ -266,7 +267,20 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     return { mod, appendedMessages }
   }
 
-  it('auto-disbands when two different agents send completion signals within 60s', async () => {
+  it('auto-disbands when two different agents send high-confidence completion signals within 60s', async () => {
+    const team = makeTeam()
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'All work finished [DONE]', timestamp: '2026-03-18T12:04:20.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'My part is [COMPLETE]', timestamp: '2026-03-18T12:04:50.000Z' }),
+    ]
+
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+
+    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
+  })
+
+  it('does NOT auto-disband on low-confidence signals within 60s', async () => {
     const team = makeTeam()
     const messages: EnsembleMessage[] = [
       makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Task is done', timestamp: '2026-03-18T12:04:20.000Z' }),
@@ -276,13 +290,13 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
+    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
   })
 
-  it('does NOT auto-disband when only one completion signal exists and idle is <= 120s', async () => {
+  it('does NOT auto-disband when only one high-confidence signal exists and idle is <= 120s', async () => {
     const team = makeTeam()
     const messages: EnsembleMessage[] = [
-      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Task is done', timestamp: '2026-03-18T12:03:40.000Z' }),
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[DONE]', timestamp: '2026-03-18T12:03:40.000Z' }),
       makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still working', timestamp: '2026-03-18T12:03:50.000Z' }),
     ]
 
@@ -292,11 +306,24 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
   })
 
-  it('auto-disbands when one completion signal exists and team is idle for more than 120s', async () => {
+  it('auto-disbands when one high-confidence signal exists and team is idle for more than 120s', async () => {
     const team = makeTeam()
     const messages: EnsembleMessage[] = [
-      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Task is done', timestamp: '2026-03-18T12:02:30.000Z' }),
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[DONE] my part', timestamp: '2026-03-18T12:02:30.000Z' }),
       makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still investigating', timestamp: '2026-03-18T12:02:40.000Z' }),
+    ]
+
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+
+    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
+  })
+
+  it('auto-disbands on low-confidence signals after extended idle (5min)', async () => {
+    const team = makeTeam()
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Task is done', timestamp: '2026-03-18T11:58:00.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Wrapping up', timestamp: '2026-03-18T11:58:10.000Z' }),
     ]
 
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
@@ -369,7 +396,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
   it('ignores ensemble messages when determining idle time', async () => {
     const team = makeTeam()
     const messages: EnsembleMessage[] = [
-      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Done', timestamp: '2026-03-18T12:02:30.000Z' }),
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[DONE]', timestamp: '2026-03-18T12:02:30.000Z' }),
       makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still working', timestamp: '2026-03-18T12:02:35.000Z' }),
       makeMessage({ from: 'ensemble', teamId: 'team-1', content: 'Agent joined', timestamp: '2026-03-18T12:04:55.000Z' }),
     ]
@@ -385,7 +412,12 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
 // 3. Completion pattern matching (unit tests)
 // ─────────────────────────────────────────────────────
 describe('completion signal patterns', () => {
-  const COMPLETION_PATTERNS = [
+  const HIGH_CONFIDENCE = [
+    /\[DONE\]/i,
+    /\[COMPLETE\]/i,
+    /\[FINISHED\]/i,
+  ]
+  const LOW_CONFIDENCE = [
     /(?:^|[^\p{L}\p{N}_])afgerond(?:[^\p{L}\p{N}_]|$)/iu,
     /(?:^|[^\p{L}\p{N}_])done(?:[^\p{L}\p{N}_]|$)/iu,
     /(?:^|[^\p{L}\p{N}_])complete(?:d)?(?:[^\p{L}\p{N}_]|$)/iu,
@@ -393,27 +425,32 @@ describe('completion signal patterns', () => {
     /(?:^|\s)tot de volgende(?:\s|$)/i,
   ]
 
-  function hasCompletionSignal(content: string): boolean {
-    return COMPLETION_PATTERNS.some(p => p.test(content))
+  function getCompletionConfidence(content: string): 'high' | 'low' | null {
+    if (HIGH_CONFIDENCE.some(p => p.test(content))) return 'high'
+    if (LOW_CONFIDENCE.some(p => p.test(content))) return 'low'
+    return null
   }
 
   it.each([
-    ['The task is done.', true],
-    ['Work completed successfully', true],
-    ['Task is complete', true],
-    ['De taak is afgerond', true],
-    ['Ik ben klaar met de analyse', true],
-    ['Tot de volgende keer!', true],
-    ['DONE', true],
-    ['Klaar', true],
-    ['Still working on the task', false],
-    ['Analyzing the codebase now', false],
-    ['abandoned', false],
-    ['completion marker only', false],
-    ['undone but still working', false],
-    ['', false],
-  ])('"%s" → %s', (content: string, expected: boolean) => {
-    expect(hasCompletionSignal(content)).toBe(expected)
+    ['[DONE]', 'high'],
+    ['All work [COMPLETE]', 'high'],
+    ['[FINISHED] everything', 'high'],
+    ['The task is done.', 'low'],
+    ['Work completed successfully', 'low'],
+    ['Task is complete', 'low'],
+    ['De taak is afgerond', 'low'],
+    ['Ik ben klaar met de analyse', 'low'],
+    ['Tot de volgende keer!', 'low'],
+    ['DONE', 'low'],
+    ['Klaar', 'low'],
+    ['Still working on the task', null],
+    ['Analyzing the codebase now', null],
+    ['abandoned', null],
+    ['completion marker only', null],
+    ['undone but still working', null],
+    ['', null],
+  ] as const)('"%s" → %s', (content: string, expected: 'high' | 'low' | null) => {
+    expect(getCompletionConfidence(content)).toBe(expected)
   })
 })
 
@@ -604,6 +641,7 @@ describe('worktree isolation lifecycle', () => {
       loadTeams: vi.fn(() => []),
       appendMessage,
       getMessages: vi.fn(() => []),
+      getActiveTeamsByWorkingDir: vi.fn(() => []),
     }))
     vi.doMock('../lib/agent-spawner', () => ({
       spawnLocalAgent,
@@ -825,6 +863,7 @@ describe('staged workflow integration', () => {
       loadTeams: vi.fn(() => []),
       appendMessage: vi.fn(),
       getMessages: vi.fn(() => []),
+      getActiveTeamsByWorkingDir: vi.fn(() => []),
     }))
     vi.doMock('../lib/agent-spawner', () => ({
       spawnLocalAgent: vi.fn(async ({ name, program, workingDirectory, hostId }) => ({

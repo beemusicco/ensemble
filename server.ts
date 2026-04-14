@@ -8,11 +8,12 @@ import {
   createEnsembleTeam, getEnsembleTeam, listEnsembleTeams,
   getTeamFeed, sendTeamMessage, disbandTeam,
 } from './services/ensemble-service'
+import { getTeam } from './lib/ensemble-registry'
 
 const PORT = parseInt(process.env.ENSEMBLE_PORT || process.env.ORCHESTRA_PORT || '23000', 10)
 const HOST = process.env.ENSEMBLE_HOST || '127.0.0.1'
 const RATE_LIMIT_WINDOW_MS = 60_000
-const RATE_LIMIT_MAX_REQUESTS = 100
+const RATE_LIMIT_MAX_REQUESTS = 500
 const DEFAULT_CORS_ORIGIN_PATTERNS = [
   /^http:\/\/localhost(?::\d+)?$/i,
   /^http:\/\/127\.0\.0\.1(?::\d+)?$/i,
@@ -166,7 +167,17 @@ const server = http.createServer(async (req, res) => {
         } catch {
           return json(res, { error: 'Bad Request: malformed JSON' }, 400, origin)
         }
-        const result = await sendTeamMessage(teamId, (body.to as string) || 'team', body.content as string, body.from as string, body.id as string, body.timestamp as string)
+        const sender = body.from as string
+        if (sender) {
+          const team = getTeam(teamId)
+          if (team) {
+            const validSenders = new Set([...team.agents.map(a => a.name), 'user', 'ensemble'])
+            if (!validSenders.has(sender)) {
+              return json(res, { error: `Unauthorized: unknown sender '${sender}'` }, 403, origin)
+            }
+          }
+        }
+        const result = await sendTeamMessage(teamId, (body.to as string) || 'team', body.content as string, sender, body.id as string, body.timestamp as string)
         if (result.error) return json(res, { error: result.error }, result.status, origin)
         return json(res, result.data, result.status, origin)
       }

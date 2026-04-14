@@ -54,6 +54,7 @@ export function resolveAgentProgram(program: string): AgentProgram {
     inputMethod: 'sendKeys' as const,
     color: 'white',
     icon: '○',
+    postReadyDelayMs: 2000,
   }
 }
 

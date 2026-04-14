@@ -155,7 +155,7 @@ with open('$FILE') as f:
 
 # Output the last successfully posted line number
 print(last_success, flush=True)
-" 2>&1 1>"$RESULT_FILE")
+" 1>"$RESULT_FILE" 2>&1)
 
     # Echo captured stderr (diagnostic messages) so they appear in bridge log
     [ -n "$NEW_POSTED" ] && echo "$NEW_POSTED" >&2

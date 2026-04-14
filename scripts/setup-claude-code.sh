@@ -36,6 +36,7 @@ SCRIPTS=(
   "Bash(${REPO_DIR}/scripts/collab-cleanup.sh:*)"
   "Bash(${REPO_DIR}/scripts/collab-replay.sh:*)"
   "Bash(${REPO_DIR}/scripts/ensemble-bridge.sh:*)"
+  "Bash(${REPO_DIR}/scripts/ensemble-bridge-supervisor.sh:*)"
 )
 
 ADDED=0

@@ -216,6 +216,13 @@ class Monitor {
     this.pollInterval = setInterval(async () => {
       try {
         await this.fetchTeam()
+        if (this.team && (this.team.status === 'disbanded' || this.team.status === 'completed')) {
+          await this.fetchMessages()
+          this.render()
+          await new Promise(r => setTimeout(r, 3000))
+          this.cleanup()
+          process.exit(0)
+        }
         await this.fetchMessages()
         if (this.messages.length !== this.lastMessageCount) {
           this.lastMessageCount = this.messages.length
@@ -256,8 +263,9 @@ class Monitor {
     const newMessages = data.messages || []
 
     if (this.lastSeenTimestamp && newMessages.length > 0) {
-      // Incremental: append only new messages
-      this.messages.push(...newMessages)
+      const existingIds = new Set(this.messages.map(m => m.id))
+      const unique = newMessages.filter(m => !existingIds.has(m.id))
+      this.messages.push(...unique)
     } else if (!this.lastSeenTimestamp) {
       // Initial fetch: take all
       this.messages = newMessages

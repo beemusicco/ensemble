@@ -6,16 +6,18 @@
     "readyMarker": "›",
     "inputMethod": "pasteFromFile",
     "color": "blue",
-    "icon": "◆"
+    "icon": "◆",
+    "postReadyDelayMs": 2000
   },
   "claude": {
     "name": "claude",
     "command": "claude",
     "flags": ["--dangerously-skip-permissions"],
     "readyMarker": "❯",
-    "inputMethod": "sendKeys",
+    "inputMethod": "pasteFromFile",
     "color": "green",
-    "icon": "●"
+    "icon": "●",
+    "postReadyDelayMs": 3000
   },
   "aider": {
     "name": "aider",
@@ -43,5 +45,15 @@
     "inputMethod": "sendKeys",
     "color": "cyan",
     "icon": "▣"
+  },
+  "claude2": {
+    "name": "claude2",
+    "command": "claude",
+    "flags": ["--dangerously-skip-permissions"],
+    "readyMarker": "❯",
+    "inputMethod": "pasteFromFile",
+    "color": "yellow",
+    "icon": "◇",
+    "postReadyDelayMs": 3000
   }
 }

@@ -18,6 +18,8 @@ export interface AgentProgram {
   color: string
   /** Single-char icon shown in monitor UI (e.g. "◆", "●", "▲", "★") */
   icon: string
+  /** Milliseconds to wait after readyMarker detected before injecting prompt (default: 2000) */
+  postReadyDelayMs?: number
 }
 
 export interface AgentsConfig {

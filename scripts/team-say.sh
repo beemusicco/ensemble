@@ -11,17 +11,18 @@ source "$SCRIPT_DIR/collab-paths.sh"
 TEAM_ID="$1"; FROM="$2"; TO="$3"; shift 3; MSG="$*"
 FILE="$(collab_messages_file "$TEAM_ID")"
 DIR="$(dirname "$FILE")"
-LOCK_FILE="$FILE.lock"
+LOCK_DIR="$FILE.lock"
 mkdir -p "$DIR"
-touch "$FILE" "$LOCK_FILE"
+touch "$FILE"
 python3 -c "
-import fcntl
 import json
+import os
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 
-team_id, sender, recipient, content, output_path, lock_path = sys.argv[1:7]
+team_id, sender, recipient, content, output_path, lock_dir = sys.argv[1:7]
 msg = {
     'id': str(uuid.uuid4()),
     'teamId': team_id,
@@ -32,11 +33,29 @@ msg = {
     'timestamp': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
 }
 
-with open(lock_path, 'w', encoding='utf-8') as lock_handle:
-    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-    with open(output_path, 'a', encoding='utf-8') as output_handle:
-        output_handle.write(json.dumps(msg) + '\n')
-    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-" "$TEAM_ID" "$FROM" "$TO" "$MSG" "$FILE" "$LOCK_FILE"
+# Acquire mkdir-based lock (compatible with ensemble-registry.ts appendMessage)
+start = time.time()
+acquired = False
+while time.time() - start < 5.0:
+    try:
+        os.mkdir(lock_dir)
+        acquired = True
+        break
+    except FileExistsError:
+        try:
+            if time.time() - os.stat(lock_dir).st_mtime > 10.0:
+                import shutil; shutil.rmtree(lock_dir, ignore_errors=True)
+                continue
+        except OSError:
+            pass
+        time.sleep(0.05)
+
+try:
+    with open(output_path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(msg) + '\n')
+finally:
+    if acquired:
+        import shutil; shutil.rmtree(lock_dir, ignore_errors=True)
+" "$TEAM_ID" "$FROM" "$TO" "$MSG" "$FILE" "$LOCK_DIR"
 
 echo "Sent to $TO"

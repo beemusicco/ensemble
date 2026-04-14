@@ -8,7 +8,7 @@ import { v4 as uuidv4 } from 'uuid'
 import type { EnsembleTeam, EnsembleMessage, CreateTeamRequest, CollabTemplatesFile } from '../types/ensemble'
 import {
   createTeam, getTeam, updateTeam, loadTeams,
-  appendMessage, getMessages,
+  appendMessage, getMessages, getActiveTeamsByWorkingDir,
 } from '../lib/ensemble-registry'
 import {
   spawnLocalAgent, killLocalAgent,
@@ -43,7 +43,15 @@ interface ServiceResult<T> {
 const IDLE_CHECK_INTERVAL_MS = 15_000
 const COMPLETION_SIGNAL_WINDOW_MS = 60_000
 const SINGLE_SIGNAL_IDLE_THRESHOLD_MS = 120_000
-const COMPLETION_PATTERNS = [
+const LOW_CONFIDENCE_IDLE_THRESHOLD_MS = 300_000
+
+const HIGH_CONFIDENCE_COMPLETION = [
+  /\[DONE\]/i,
+  /\[COMPLETE\]/i,
+  /\[FINISHED\]/i,
+]
+
+const LOW_CONFIDENCE_COMPLETION = [
   /(?:^|[^\p{L}\p{N}_])afgerond(?:[^\p{L}\p{N}_]|$)/iu,
   /(?:^|[^\p{L}\p{N}_])done(?:[^\p{L}\p{N}_]|$)/iu,
   /(?:^|[^\p{L}\p{N}_])complete(?:d)?(?:[^\p{L}\p{N}_]|$)/iu,
@@ -54,6 +62,7 @@ const COMPLETION_PATTERNS = [
 interface CompletionSignal {
   agentName: string
   timestamp: number
+  confidence: 'high' | 'low'
 }
 // Telegram notifications: set both env vars to enable, omit to disable
 const TELEGRAM_BOT_TOKEN = process.env.ENSEMBLE_TELEGRAM_BOT_TOKEN || ''
@@ -73,6 +82,15 @@ class EnsembleService {
       loadTeams,
       getMessages: (teamId: string) => getMessages(teamId),
       appendMessage,
+      disbandTeam: async (teamId: string, _reason: string) => {
+        if (this.disbandingTeams.has(teamId)) return
+        this.disbandingTeams.add(teamId)
+        try {
+          await disbandTeam(teamId)
+        } finally {
+          this.disbandingTeams.delete(teamId)
+        }
+      },
       getRuntime,
       resolveAgentProgram,
       isSelf: (hostId?: string) => isSelf(hostId || ''),
@@ -106,7 +124,6 @@ class EnsembleService {
           timestamp: new Date().toISOString(),
         })
 
-        await writeDisbandSummary(team.id)
         await disbandTeam(team.id)
       } catch (err) {
         console.error(`[Ensemble] Auto-disband failed for ${team.id}:`, err)
@@ -122,7 +139,6 @@ class EnsembleService {
     const lastMessage = nonEnsembleMessages[nonEnsembleMessages.length - 1]
     if (!lastMessage) return false
 
-    // Robust timestamp handling: skip idle check if no timestamp available
     const lastTimestamp = lastMessage.timestamp
       ? new Date(lastMessage.timestamp).getTime()
       : NaN
@@ -134,21 +150,27 @@ class EnsembleService {
     const idleForMs = Date.now() - lastTimestamp
     const activeAgentNames = new Set(activeAgents.map(agent => agent.name))
     const completionSignals = messages
-      .filter(message => activeAgentNames.has(message.from) && this.hasCompletionSignal(message.content))
+      .filter(message => activeAgentNames.has(message.from) && this.getCompletionConfidence(message.content) !== null)
       .map(message => ({
         agentName: message.from,
         timestamp: message.timestamp ? new Date(message.timestamp).getTime() : NaN,
+        confidence: this.getCompletionConfidence(message.content)!,
       }))
       .filter((signal): signal is CompletionSignal => !Number.isNaN(signal.timestamp))
       .sort((a, b) => a.timestamp - b.timestamp)
 
-    if (this.hasTwoRecentCompletionSignals(completionSignals)) return true
-    if (idleForMs <= SINGLE_SIGNAL_IDLE_THRESHOLD_MS) return false
+    const highConfSignals = completionSignals.filter(s => s.confidence === 'high')
+    if (this.hasTwoRecentCompletionSignals(highConfSignals)) return true
+    if (highConfSignals.length >= 1 && idleForMs > SINGLE_SIGNAL_IDLE_THRESHOLD_MS) return true
+
+    if (idleForMs <= LOW_CONFIDENCE_IDLE_THRESHOLD_MS) return false
     return completionSignals.length >= 1
   }
 
-  private hasCompletionSignal(content: string): boolean {
-    return COMPLETION_PATTERNS.some(pattern => pattern.test(content))
+  private getCompletionConfidence(content: string): 'high' | 'low' | null {
+    if (HIGH_CONFIDENCE_COMPLETION.some(p => p.test(content))) return 'high'
+    if (LOW_CONFIDENCE_COMPLETION.some(p => p.test(content))) return 'low'
+    return null
   }
 
   private hasTwoRecentCompletionSignals(signals: CompletionSignal[]): boolean {
@@ -310,8 +332,18 @@ export async function createEnsembleTeam(
   const cwd = request.workingDirectory || process.cwd()
   const worktreeMap = new Map<string, WorktreeInfo>()
 
-  // Phase 0: Create worktrees for local agents if requested
-  if (request.useWorktrees) {
+  // Auto-enable worktrees when another collab is active on the same working directory
+  const concurrentTeams = getActiveTeamsByWorkingDir(cwd).filter(t => t.id !== team.id)
+  const useWorktrees = request.useWorktrees || concurrentTeams.length > 0
+  if (concurrentTeams.length > 0 && !request.useWorktrees) {
+    appendMessage(team.id, {
+      id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
+      content: `⚠️ Concurrent collab detected (${concurrentTeams.length} active on same dir) — using git worktrees for isolation`,
+      type: 'chat', timestamp: new Date().toISOString(),
+    })
+  }
+
+  if (useWorktrees) {
     for (let i = 0; i < team.agents.length; i++) {
       const agentSpec = team.agents[i]
       const hostId = request.agents[i].hostId
@@ -399,7 +431,7 @@ export async function createEnsembleTeam(
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
       console.error(`[Ensemble] Failed to spawn ${agentName}:`, message)
-      team.agents[i].status = 'idle'
+      team.agents[i].status = 'failed'
       appendMessage(team.id, {
         id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
         content: `Failed to spawn ${agentName}: ${message}`,
@@ -408,10 +440,10 @@ export async function createEnsembleTeam(
     }
   }
 
-  updateTeam(team.id, { ...team, status: 'active' })
+  const activeAgents = team.agents.filter(a => a.status === 'active')
+  updateTeam(team.id, { ...team, status: activeAgents.length >= 2 ? 'active' : 'failed' })
 
   // Phase 2: Wait for ALL agents to be ready, then inject prompts
-  const activeAgents = team.agents.filter(a => a.status === 'active')
   if (activeAgents.length >= 2) {
     const runtime = getRuntime()
 
@@ -431,7 +463,8 @@ export async function createEnsembleTeam(
             }
           } else {
             const output = await runtime.capturePane(sessionName, 50)
-            if (output.includes(readyMarker)) {
+            const lastLines = output.split('\n').slice(-5).join('\n')
+            if (lastLines.includes(readyMarker)) {
               console.log(`[Ensemble] ${sessionName} is ready (${Math.round((Date.now() - start) / 1000)}s)`)
               return true
             }
@@ -468,10 +501,14 @@ export async function createEnsembleTeam(
         content: `❌ Team start aborted: only ${ready.length}/${activeAgents.length} agents ready`,
         type: 'chat', timestamp: new Date().toISOString(),
       })
-      return { data: { team }, status: 201 }
+      updateTeam(team.id, { status: 'failed' })
+      return { data: { team: { ...team, status: 'failed' } }, status: 201 }
     }
 
-    await new Promise(r => setTimeout(r, 2000))
+    const postReadyDelay = Math.max(
+      ...ready.map(({ agent }) => resolveAgentProgram(agent.program).postReadyDelayMs ?? 2000)
+    )
+    await new Promise(r => setTimeout(r, postReadyDelay))
 
     // Phase 3: Inject prompts (skip if staged — staged workflow handles its own prompts)
     if (request.staged) {
@@ -489,12 +526,13 @@ export async function createEnsembleTeam(
         `Do NOT write code, edit files, or run mutating commands yet.`,
         `Both agents must share their plan before implementation begins.`,
         `After sharing your plan, run team-read and align on the execution approach.`,
+        `Include [PLAN_READY] in your team-say message when your plan is finalized.`,
       ].join(' ')
 
       const buildStagedExecPrompt = (otherNames: string[]): string => [
         `PHASE 2 EXEC: Planning is complete.`,
         `You may now execute the agreed plan and make code changes.`,
-        `Share concrete progress via team-say and explicitly report when your implementation is done.`,
+        `Share concrete progress via team-say. Include [EXEC_DONE] in your message when your implementation is done.`,
         `Keep coordinating with ${otherNames.join(', ')} as you work.`,
       ].join(' ')
 
@@ -502,6 +540,7 @@ export async function createEnsembleTeam(
         `PHASE 3 VERIFY: Review ${teammateToReview || 'your teammate'}'s work.`,
         `Inspect what they changed, compare it against the plan, and report findings via team-say.`,
         `Focus on bugs, regressions, missing tests, and mismatches with the agreed approach.`,
+        `Include [VERIFY_DONE] in your message when review is complete.`,
       ].join(' ')
 
       // Run in background so createEnsembleTeam returns immediately
@@ -517,6 +556,7 @@ export async function createEnsembleTeam(
           content: `❌ Staged workflow failed: ${message}`,
           type: 'chat', timestamp: new Date().toISOString(),
         })
+        updateTeam(team.id, { status: 'failed' })
       })
     } else {
       // Normal mode: inject prompts simultaneously
@@ -609,11 +649,6 @@ export async function sendTeamMessage(
     try {
       const sessionName = `${team.name}-${targetAgent.name}`
 
-      // Skip delivery if the agent's tmux pane no longer exists (agent finished and exited)
-      const paneAlive = await runtime.sessionExists(sessionName)
-      if (!paneAlive) continue
-
-      // Wrap message with sender context + response nudge
       const deliveryText = [
         `[Team message from ${sender}]: ${content}`,
         `→ Respond with team-say. Then run team-read to check for more messages.`,
@@ -623,12 +658,28 @@ export async function sendTeamMessage(
         const host = getHostById(targetAgent.hostId)
         if (host) await postRemoteSessionCommand(host.url, sessionName, deliveryText)
       } else {
-        // Always use pasteFromFile for message delivery to avoid shell escaping issues
-        // (sendKeys breaks on ?, !, \ and other special chars in zsh)
+        const paneAlive = await runtime.sessionExists(sessionName)
+        if (!paneAlive) continue
         const tmpFile = collabDeliveryFile(teamId, sessionName)
         fs.mkdirSync(path.dirname(tmpFile), { recursive: true })
         fs.writeFileSync(tmpFile, deliveryText)
-        await runtime.pasteFromFile(sessionName, tmpFile)
+        await runtime.cancelCopyMode(sessionName)
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            await runtime.pasteFromFile(sessionName, tmpFile)
+            try { fs.unlinkSync(tmpFile) } catch { /* */ }
+            break
+          } catch (e) {
+            if (attempt === 0) {
+              console.warn(`[Ensemble] Delivery attempt 1 failed for ${sessionName}, retrying in 2s`)
+              await new Promise(r => setTimeout(r, 2000))
+              await runtime.cancelCopyMode(sessionName)
+            } else {
+              try { fs.unlinkSync(tmpFile) } catch { /* */ }
+              throw e
+            }
+          }
+        }
       }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
@@ -738,6 +789,7 @@ export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team:
     const worktreesDir = path.dirname(firstWorktree)
     const basePath = path.dirname(worktreesDir)
 
+    const conflictedAgents = new Set<string>()
     for (const agent of agentsWithWorktrees) {
       const worktreeInfo: WorktreeInfo = {
         path: agent.worktreePath!,
@@ -746,16 +798,21 @@ export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team:
       }
       const result = await mergeWorktree(worktreeInfo, basePath)
 
+      if (!result.success) conflictedAgents.add(agent.name)
       appendMessage(teamId, {
         id: uuidv4(), teamId, from: 'ensemble', to: 'team',
         content: result.success
           ? `🌳 Merged ${agent.name}'s worktree (${agent.worktreeBranch})`
-          : `⚠️ Merge conflict for ${agent.name}: ${result.conflicts?.join(', ')}`,
+          : `⚠️ Merge conflict for ${agent.name}: ${result.conflicts?.join(', ')}. Branch ${agent.worktreeBranch} preserved.`,
         type: 'chat', timestamp: new Date().toISOString(),
       })
     }
 
     for (const agent of agentsWithWorktrees) {
+      if (conflictedAgents.has(agent.name)) {
+        console.warn(`[Ensemble] Skipping worktree destroy for ${agent.name} — merge had conflicts, branch preserved`)
+        continue
+      }
       const worktreeInfo: WorktreeInfo = {
         path: agent.worktreePath!,
         branch: agent.worktreeBranch!,

@@ -58,7 +58,8 @@ export async function spawnLocalAgent(options: SpawnAgentOptions): Promise<Spawn
   const envForward = Object.entries(process.env)
     .filter(([k]) => k.startsWith('ENSEMBLE_') || k.startsWith('NVIDIA_') || k.startsWith('OPENAI_') || k.startsWith('ANTHROPIC_'))
     .filter(([, v]) => v)
-    .map(([k, v]) => `export ${k}="${v}"`)
+    .map(([k, v]) => `export ${k}="${v!.replace(/["\\$`]/g, '\\$&')}"`)
+
     .join('; ')
   const envPrefix = envForward ? `${envForward}; ` : ''
 

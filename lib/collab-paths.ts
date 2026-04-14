@@ -49,9 +49,10 @@ export function collabPromptFile(teamId: string, agentName: string): string {
   return path.join(RUNTIME_ROOT, teamId, 'prompts', `${agentName}.txt`)
 }
 
-/** Per-session delivery file */
+/** Per-session delivery file — unique per write to avoid race conditions between concurrent writers */
 export function collabDeliveryFile(teamId: string, sessionName: string): string {
-  return path.join(RUNTIME_ROOT, teamId, 'delivery', `${sessionName}.txt`)
+  const suffix = Math.random().toString(36).slice(2, 10)
+  return path.join(RUNTIME_ROOT, teamId, 'delivery', `${sessionName}-${suffix}.txt`)
 }
 
 /** Bridge result file (raw bridge output) */
