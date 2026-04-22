@@ -13,10 +13,19 @@ MAX_FAILURES=5
 FAILURE_WINDOW=60
 MAX_BACKOFF=30
 
+# Watch for finish marker — stop retrying against a completed collab.
+# Pre-fix forensics found 7 stale supervisors looping for 4 days.
+FINISHED_MARKER="/tmp/ensemble/$TEAM_ID/.finished"
+
 failures=()
 backoff=1
 
 while true; do
+  if [ -f "$FINISHED_MARKER" ]; then
+    echo "[bridge-supervisor] .finished detected — exiting cleanly" >&2
+    exit 0
+  fi
+
   "$BRIDGE" "$TEAM_ID" "$API"
   exit_code=$?
 
@@ -42,7 +51,18 @@ while true; do
   fi
 
   echo "[bridge-supervisor] Bridge exited ($exit_code), restarting in ${backoff}s (${#failures[@]}/$MAX_FAILURES recent failures)" >&2
-  sleep "$backoff"
+
+  # Split the sleep into 1s ticks so .finished written during backoff triggers
+  # exit within ~1s instead of waiting the full cycle (up to 30s).
+  slept=0
+  while [ "$slept" -lt "$backoff" ]; do
+    if [ -f "$FINISHED_MARKER" ]; then
+      echo "[bridge-supervisor] .finished during backoff — exiting cleanly" >&2
+      exit 0
+    fi
+    sleep 1
+    slept=$((slept + 1))
+  done
 
   backoff=$((backoff * 2))
   if [ "$backoff" -gt "$MAX_BACKOFF" ]; then
