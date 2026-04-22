@@ -183,8 +183,16 @@ printf '%s\n' "$TEAM_ID" > "$TEAM_ID_FILE"
 # ─── State machine marker (observable lifecycle) ───
 # Writers move through creating → active → finishing → finished → cleaned.
 # Readers query state without piecing together PID tables.
+# Atomic write so a reader catching mid-write never sees a truncated value.
 STATE_FILE="$RUNTIME_DIR/.state"
-printf 'creating\n' > "$STATE_FILE"
+write_state() {
+  local new_state="$1"
+  local tmp
+  tmp=$(mktemp "${STATE_FILE}.XXXXXX")
+  printf '%s\n' "$new_state" > "$tmp"
+  mv -f "$tmp" "$STATE_FILE"
+}
+write_state "creating"
 
 # ─── Shared latest-team-id: per-launcher-PID file (zero race) + global fallback ───
 # Parent that invoked this script as a subprocess should read /tmp/collab-team-$PPID.txt
@@ -199,7 +207,20 @@ mv -f "$LATEST_TMP" /tmp/collab-team-id.txt
 echo -e "  ${CHECK} Team created ${D}(${TEAM_NAME})${R}"
 
 # ─── 3. Bridge (writes its own PID file via single-instance guard) ───
-nohup "$SCRIPT_DIR/ensemble-bridge-supervisor.sh" "$TEAM_ID" "$API" >> "$BRIDGE_LOG_FILE" 2>&1 &
+# Use setsid so bridge-supervisor runs in its own process group. One signal
+# (kill -TERM -- -$PGID) then cleanly nukes the entire helper subtree —
+# supervisor, bridge child, any grandchildren. No more orphan procs surviving
+# a parent exit.
+if command -v setsid >/dev/null 2>&1; then
+  setsid nohup "$SCRIPT_DIR/ensemble-bridge-supervisor.sh" "$TEAM_ID" "$API" >> "$BRIDGE_LOG_FILE" 2>&1 &
+else
+  nohup "$SCRIPT_DIR/ensemble-bridge-supervisor.sh" "$TEAM_ID" "$API" >> "$BRIDGE_LOG_FILE" 2>&1 &
+fi
+# macOS ps reports PGID in column 7 when we ask for it via -o pgid
+SUPERVISOR_PID=$!
+printf '%s\n' "$SUPERVISOR_PID" > "$RUNTIME_DIR/supervisor.pid"
+SUPERVISOR_PGID=$(ps -p "$SUPERVISOR_PID" -o pgid= 2>/dev/null | tr -d ' ')
+[ -n "$SUPERVISOR_PGID" ] && printf '%s\n' "$SUPERVISOR_PGID" > "$RUNTIME_DIR/.pgid"
 echo -e "  ${CHECK} Bridge started"
 
 # ─── 4. Monitor ───
@@ -253,10 +274,10 @@ done
 MC=$(wc -l < "$MESSAGES_FILE" 2>/dev/null | tr -d ' ' || echo "0")
 if [ "${MC:-0}" -gt "0" ]; then
   echo -e "\r  ${CHECK} Agents communicating ${D}(${MC} messages)${R}"
-  printf 'active\n' > "$STATE_FILE"
+  write_state "active"
 else
   echo -e "\r  ${SPIN} Agents warming up...       "
-  printf 'active\n' > "$STATE_FILE"
+  write_state "active"
 fi
 
 # ─── Output ───

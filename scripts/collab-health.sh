@@ -30,8 +30,21 @@ MSG_COUNT=0
 # Process counts
 BRIDGE_ALIVE=0
 POLLER_ALIVE=0
+PGID_ALIVE=0
 [ -f "$RD/bridge.pid" ] && kill -0 "$(cat "$RD/bridge.pid")" 2>/dev/null && BRIDGE_ALIVE=1
 [ -f "$RD/poller.pid" ] && kill -0 "$(cat "$RD/poller.pid")" 2>/dev/null && POLLER_ALIVE=1
+if [ -f "$RD/.pgid" ]; then
+  PGID=$(cat "$RD/.pgid" 2>/dev/null | tr -d ' \n')
+  if [ -n "$PGID" ] && pgrep -g "$PGID" >/dev/null 2>&1; then
+    PGID_ALIVE=1
+  fi
+fi
+
+# Recent message rate (heuristic — count of last 20 lines as proxy for activity)
+MSG_RATE_RECENT=0
+if [ -f "$RD/messages.jsonl" ] && [ "$MSG_COUNT" -gt 0 ]; then
+  MSG_RATE_RECENT=$(tail -20 "$RD/messages.jsonl" 2>/dev/null | wc -l | tr -d ' ')
+fi
 
 # Tmux sessions for agents
 TMUX_SESSIONS=0
@@ -63,8 +76,8 @@ if [ -f "$RD/messages.jsonl" ] && [ "$MSG_COUNT" -gt 0 ]; then
   LAST_AGE=$((NOW - MTIME))
 fi
 
-printf '{"team_id":"%s","state":"%s","healthy":%s,"messages":%s,"last_message_age_sec":%s,"bridge_alive":%s,"poller_alive":%s,"tmux_sessions":%s,"experts_injected":%s}\n' \
-  "$TEAM_ID" "$STATE" "$HEALTHY" "$MSG_COUNT" "$LAST_AGE" "$BRIDGE_ALIVE" "$POLLER_ALIVE" "$TMUX_SESSIONS" "$EXPERTS_INJECTED"
+printf '{"team_id":"%s","state":"%s","healthy":%s,"messages":%s,"last_message_age_sec":%s,"bridge_alive":%s,"poller_alive":%s,"pgid_alive":%s,"tmux_sessions":%s,"experts_injected":%s,"msg_rate_recent":%s}\n' \
+  "$TEAM_ID" "$STATE" "$HEALTHY" "$MSG_COUNT" "$LAST_AGE" "$BRIDGE_ALIVE" "$POLLER_ALIVE" "$PGID_ALIVE" "$TMUX_SESSIONS" "$EXPERTS_INJECTED" "$MSG_RATE_RECENT"
 
 # Exit codes for scripting
 [ "$HEALTHY" = "true" ] && exit 0

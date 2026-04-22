@@ -116,9 +116,60 @@ else
   fail "poller loop has no exit condition (zombie leak)"
 fi
 
+# Test 11: process group — launcher uses setsid + writes .pgid
+if grep -q "setsid" "$SCRIPT_DIR/collab-launch.sh"; then
+  pass "launcher spawns helpers via setsid (own process group)"
+else
+  fail "no setsid — zombie helpers survive parent exit"
+fi
+if grep -q '\.pgid' "$SCRIPT_DIR/collab-launch.sh"; then
+  pass "launcher records .pgid for deterministic group kill"
+else
+  fail "no .pgid written — can't do single-signal teardown"
+fi
+
+# Test 12: collab-terminate uses process group
+if [ -x "$SCRIPT_DIR/collab-terminate.sh" ]; then
+  if grep -q "kill -TERM -- -" "$SCRIPT_DIR/collab-terminate.sh"; then
+    pass "collab-terminate.sh uses process-group kill"
+  else
+    fail "collab-terminate.sh exists but no pgkill"
+  fi
+else
+  fail "collab-terminate.sh missing"
+fi
+
+# Test 13: atomic state marker writes
+if grep -q "mktemp.*state\|state.*XXXXXX\|write_state" "$SCRIPT_DIR/collab-launch.sh"; then
+  pass "launcher writes state marker atomically"
+else
+  fail "state marker not atomic — readers can see truncated value"
+fi
+
+# Test 14: watchdog detects polite-ack variants
+if grep -q "isPoliteAckPhrase" "$REPO_DIR/lib/agent-watchdog.ts"; then
+  pass "watchdog has polite-ack phrase classifier"
+else
+  fail "watchdog only catches repeated-string idle — varied acks escape"
+fi
+
+# Test 15: health endpoint reports pgid + msg rate
+if grep -q "pgid_alive\|msg_rate_recent" "$SCRIPT_DIR/collab-health.sh"; then
+  pass "collab-health.sh reports pgid_alive + msg rate"
+else
+  fail "health endpoint missing process-group + rate signals"
+fi
+
+# Test 16: prompt injection safety — [DONE] in task is redacted
+if grep -q "tag-redacted\|class tags from user task" "$REPO_DIR/services/ensemble-service.ts"; then
+  pass "ensemble-service sanitizes prompt-injection class-tag attacks"
+else
+  fail "task [DONE] could cause agent premature completion"
+fi
+
 echo ""
 if [ "$FAILED" = "0" ]; then
-  echo "  ${0##*/}: ALL PASS"
+  echo "  ${0##*/}: ALL PASS (16 assertions)"
   exit 0
 else
   echo "  ${0##*/}: FAILURES ABOVE" >&2
