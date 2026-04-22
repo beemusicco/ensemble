@@ -103,3 +103,32 @@ When done: summarize + cleanup poller/bridge PIDs.
 - `ensemble-bridge.sh` has single-instance guard, health check, exponential backoff
 - `.finished` and `summary.txt` are written by ensemble-service, NOT by scripts
 - Bridge auto-stops when it sees `.finished` marker
+
+## Citation Evidence Rule (audit/review/verification collabs)
+
+When a task asks agents to VERIFY, AUDIT, REVIEW, or CHECK code state, every
+`file:line` citation in the final report MUST be a literal copy-paste of
+`grep -n <pattern> <file>` or `sed -n 'Np'` output — never a paraphrase from
+memory or reconstruction based on typical project layout.
+
+Why: collabs that cite file paths like `app/validators.py` or `app/eventlog.py`
+when the real paths are `app/pipeline/validators/__init__.py` and `app/events.py`
+look convincing but silently hallucinate. High-level pass/fail can be correct
+while every line number is fabricated — undermining the audit's trustworthiness
+and making root-cause investigation harder when something later breaks.
+
+Add these task clauses to audit/regression/verify prompts:
+
+```
+EVIDENCE FORMAT RULE:
+- Every file:line citation MUST be a literal grep -n / sed -n output paste,
+  wrapped in a ```bash fenced block showing the command + its output.
+- If grep returns no match, report the item as UNVERIFIED with a note
+  explaining the missing pattern. Never invent a plausible file path.
+- Report section "Verification evidence" is mandatory; report section
+  "Overall verdict" must reference the evidence by anchor (e.g. [E1], [E2]).
+```
+
+Haiku-3 (TEST-RUNNER) role is responsible for enforcing this — if claude-1 or
+codex-2 produces a citation without grep-backed proof, haiku rejects it during
+review phase with [REVIEW] citation_missing <path>.
