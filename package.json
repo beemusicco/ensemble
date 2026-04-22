@@ -1,7 +1,7 @@
 {
   "name": "@ensemble-ai/cli",
   "version": "1.0.0",
-  "description": "Multi-agent collaboration engine — AI agents that work as one",
+  "description": "Multi-agent collaboration engine \u2014 AI agents that work as one",
   "type": "module",
   "bin": {
     "ensemble": "bin/ensemble.cjs"
@@ -14,7 +14,11 @@
     "lint": "eslint . --ext .ts",
     "monitor": "tsx cli/monitor.ts --latest",
     "cli": "tsx cli/ensemble.ts",
-    "postinstall": "node ./bin/postinstall.cjs"
+    "postinstall": "node ./bin/postinstall.cjs",
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:shell": "bash tests/test_expert_injection.sh",
+    "test:all": "npm run test:unit && npm run test:shell"
   },
   "files": [
     "bin/",
@@ -32,8 +36,15 @@
     "LICENSE"
   ],
   "keywords": [
-    "ai", "agents", "multi-agent", "collaboration",
-    "claude", "codex", "gemini", "tmux", "cli"
+    "ai",
+    "agents",
+    "multi-agent",
+    "collaboration",
+    "claude",
+    "codex",
+    "gemini",
+    "tmux",
+    "cli"
   ],
   "repository": {
     "type": "git",

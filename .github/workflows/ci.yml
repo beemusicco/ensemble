@@ -25,3 +25,91 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+  test:
+    name: Test (vitest + shell)
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Vitest unit tests
+        run: npm run test:unit
+
+      - name: Shell integration tests (expert injection + infra invariants)
+        run: npm run test:shell
+
+  collab-health-smoke:
+    name: Collab lifecycle smoke test
+    runs-on: ubuntu-latest
+    needs: test
+    # Gated because it spins up the full server; keep it fast and deterministic.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Install tmux (needed by launcher)
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Start ensemble server
+        run: |
+          nohup ./node_modules/.bin/tsx server.ts > /tmp/ensemble-server.log 2>&1 &
+          for _ in $(seq 1 15); do
+            sleep 1
+            curl -sf http://localhost:23000/api/v1/health && break
+          done
+
+      - name: Launch a debug-flavoured test team
+        id: launch
+        run: |
+          bash scripts/collab-launch.sh /tmp "debug a flaky test" "haiku" 2>&1 | tee /tmp/launch.out
+          sleep 3
+          TID=$(cat /tmp/collab-team-id.txt | tr -d '\n')
+          echo "team_id=$TID" >> "$GITHUB_OUTPUT"
+          test -n "$TID"
+
+      - name: Assert template auto-detected
+        run: grep -q "Template: debug" /tmp/launch.out
+
+      - name: Assert expert injected into prompt
+        run: |
+          TID="${{ steps.launch.outputs.team_id }}"
+          grep -q "EXPERT MENTAL MODEL" /tmp/ensemble/$TID/prompts/*.txt
+
+      - name: Assert PGID recorded
+        run: |
+          TID="${{ steps.launch.outputs.team_id }}"
+          test -s /tmp/ensemble/$TID/.pgid
+
+      - name: Health endpoint reports healthy
+        run: |
+          TID="${{ steps.launch.outputs.team_id }}"
+          bash scripts/collab-health.sh "$TID"
+
+      - name: Deterministic teardown via collab-terminate.sh
+        run: |
+          TID="${{ steps.launch.outputs.team_id }}"
+          bash scripts/collab-terminate.sh "$TID" --disband
+
+      - name: Zero orphan procs/tmux after teardown
+        run: |
+          TID="${{ steps.launch.outputs.team_id }}"
+          sleep 2
+          PROCS=$(ps -ef | grep "$TID" | grep -v grep | wc -l | tr -d ' ')
+          TMUX=$(tmux ls 2>/dev/null | grep -c "$TID" || true)
+          echo "procs=$PROCS tmux=$TMUX"
+          test "$PROCS" = "0"
+          test "$TMUX" = "0"
