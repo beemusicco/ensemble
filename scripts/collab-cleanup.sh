@@ -163,3 +163,73 @@ if [ "$MODE" = "dry-run" ]; then
   echo -e "  ${D}Run with --force to delete eligible runtime directories.${R}"
   echo ""
 fi
+
+# FM20 fix: sweep orphan team-say-* scratch dirs left by scripts/team-say.sh.
+# These accumulate indefinitely (210+ seen in forensics audit) and obscure
+# the real trace inventory. Always prune older than 1h — they're ephemeral.
+TEAM_SAY_ORPHANS=0
+TEAM_SAY_REMOVED=0
+if [ -d "$ENSEMBLE_ROOT" ]; then
+  while IFS= read -r -d '' dir; do
+    TEAM_SAY_ORPHANS=$((TEAM_SAY_ORPHANS + 1))
+    if [ "$MODE" = "force" ]; then
+      if rm -rf "$dir"; then
+        TEAM_SAY_REMOVED=$((TEAM_SAY_REMOVED + 1))
+      fi
+    fi
+  done < <(find "$ENSEMBLE_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'team-say-*' -mmin +60 -print0 2>/dev/null)
+fi
+
+if [ "$TEAM_SAY_ORPHANS" -gt 0 ]; then
+  if [ "$MODE" = "force" ]; then
+    echo -e "  ${G}team-say orphans swept:${R} ${TEAM_SAY_REMOVED}/${TEAM_SAY_ORPHANS}"
+  else
+    echo -e "  ${Y}team-say orphans (>1h old):${R} ${TEAM_SAY_ORPHANS} ${D}(run with --force to sweep)${R}"
+  fi
+fi
+
+# ─── FIX: kill zombie tail-feed loops + bridge supervisors for teams
+# that already have .finished markers. These were accumulating 40+ at a time
+# because the poller had no exit condition (pre-fix) and bridge-supervisors
+# kept retrying against mrtev server.
+ZOMBIE_FEED=0
+ZOMBIE_BRIDGE=0
+
+# Find feed loops whose team dir has .finished OR whose dir no longer exists
+while IFS= read -r line; do
+  pid=$(echo "$line" | awk '{print $2}')
+  # Extract TID from the bash -c env var assignment
+  tid=$(echo "$line" | grep -oE 'TID="[a-f0-9-]{36}"' | head -1 | sed 's/TID="//;s/"//')
+  [ -z "$tid" ] && continue
+  if [ -f "/tmp/ensemble/$tid/.finished" ] || [ ! -d "/tmp/ensemble/$tid" ]; then
+    if [ "$MODE" = "force" ]; then
+      kill "$pid" 2>/dev/null && ZOMBIE_FEED=$((ZOMBIE_FEED + 1))
+    else
+      ZOMBIE_FEED=$((ZOMBIE_FEED + 1))
+    fi
+  fi
+done < <(ps -ef | grep -E 'feed\.txt|MESSAGES_FILE' | grep -v grep | grep "while true")
+
+# Find bridge supervisors whose team is .finished
+while IFS= read -r line; do
+  pid=$(echo "$line" | awk '{print $2}')
+  tid=$(echo "$line" | grep -oE '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}' | head -1)
+  [ -z "$tid" ] && continue
+  if [ -f "/tmp/ensemble/$tid/.finished" ] || [ ! -d "/tmp/ensemble/$tid" ]; then
+    if [ "$MODE" = "force" ]; then
+      kill "$pid" 2>/dev/null && ZOMBIE_BRIDGE=$((ZOMBIE_BRIDGE + 1))
+    else
+      ZOMBIE_BRIDGE=$((ZOMBIE_BRIDGE + 1))
+    fi
+  fi
+done < <(ps -ef | grep "ensemble-bridge-supervisor" | grep -v grep)
+
+if [ "$ZOMBIE_FEED" -gt 0 ] || [ "$ZOMBIE_BRIDGE" -gt 0 ]; then
+  if [ "$MODE" = "force" ]; then
+    echo -e "  ${G}zombie feed-loops killed:${R} ${ZOMBIE_FEED}"
+    echo -e "  ${G}zombie bridge supervisors killed:${R} ${ZOMBIE_BRIDGE}"
+  else
+    echo -e "  ${Y}zombie feed-loops (finished):${R} ${ZOMBIE_FEED} ${D}(--force to kill)${R}"
+    echo -e "  ${Y}zombie bridge supervisors:${R} ${ZOMBIE_BRIDGE} ${D}(--force to kill)${R}"
+  fi
+fi

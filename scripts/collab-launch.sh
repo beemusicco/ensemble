@@ -3,14 +3,31 @@
 # Usage: collab-launch.sh <working-dir> <task-description>
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=./collab-paths.sh
 source "$SCRIPT_DIR/collab-paths.sh"
 
 CWD="${1:-.}"
 TASK="${2:?Usage: collab-launch.sh <cwd> <task>}"
+
+# Smart CWD: if the task mentions a known project path, use that as CWD
+# so agents start in the right directory with correct sandbox access.
+if [ "$CWD" = "." ] || echo "$CWD" | grep -q "tools/ensemble"; then
+  for candidate in \
+    "$HOME/.openclaw/workspace/skills/crypto-trading-platform" \
+    "$HOME/projects/brainai-dashboard" \
+    "$HOME/.openclaw/workspace"; do
+    if echo "$TASK" | grep -qi "$(basename "$candidate")" && [ -d "$candidate" ]; then
+      CWD="$candidate"
+      break
+    fi
+  done
+fi
+# Resolve to absolute path
+CWD="$(cd "$CWD" 2>/dev/null && pwd || echo "$CWD")"
 AGENTS="${3:-}"  # Optional: comma-separated agent names (e.g. "gemini,claude")
+TARGET_PANE="${4:-}"  # Optional: tmux pane ID for monitor split
 API="http://localhost:23000"
 HOST_ID="${ENSEMBLE_HOST_ID:-local}"
 
@@ -23,11 +40,6 @@ echo ""
 echo -e "  ${BD}${W}◈ ensemble collab${R}"
 echo -e "  ${D}${TASK:0:80}${R}"
 echo ""
-
-# ─── 0. Mark tmux window as running ───
-if [ -n "${TMUX:-}" ]; then
-  tmux rename-window "⏳ collab" 2>/dev/null || true
-fi
 
 # ─── 1. Server ───
 if curl -sf "$API/api/v1/health" > /dev/null 2>&1; then
@@ -58,8 +70,15 @@ if active:
 " 2>/dev/null || true)
 
 if [ -n "$ACTIVE_TEAM" ]; then
-  echo -e "  ${C}●${R} Active team found on same directory — resuming..."
-  exec "$SCRIPT_DIR/collab-resume.sh" "$ACTIVE_TEAM"
+  # Only resume if tmux sessions for agents are still alive — otherwise team is orphaned
+  SESSIONS_ALIVE=$(tmux ls 2>/dev/null | grep -c "^${ACTIVE_TEAM}-\|-${ACTIVE_TEAM:0:8}-" || true)
+  if [ "${SESSIONS_ALIVE:-0}" -gt 0 ]; then
+    echo -e "  ${C}●${R} Active team found on same directory — resuming..."
+    exec "$SCRIPT_DIR/collab-resume.sh" "$ACTIVE_TEAM"
+  else
+    echo -e "  ${C}●${R} Orphaned team $ACTIVE_TEAM (no live sessions) — disbanding and creating fresh..."
+    curl -sf -X DELETE "$API/api/ensemble/teams/$ACTIVE_TEAM" > /dev/null 2>&1 || true
+  fi
 fi
 
 # ─── 2. Create team (use env vars to avoid quoting hell) ───
@@ -125,7 +144,7 @@ echo -e "  ${CHECK} Bridge started"
 # ─── 4. Monitor ───
 MONITOR_CMD="cd '$REPO_DIR' && ./node_modules/.bin/tsx cli/monitor.ts $TEAM_ID"
 if [ -n "${TMUX:-}" ]; then
-  SPAWN_PANE="${TMUX_PANE:-}"
+  SPAWN_PANE="${TARGET_PANE:-$(tmux display-message -p '#{pane_id}' 2>/dev/null || echo "")}"
   if [ -n "$SPAWN_PANE" ]; then
     tmux split-window -h -t "$SPAWN_PANE" -l '40%' "$MONITOR_CMD"
   else
