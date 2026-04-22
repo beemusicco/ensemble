@@ -28,8 +28,48 @@ fi
 CWD="$(cd "$CWD" 2>/dev/null && pwd || echo "$CWD")"
 AGENTS="${3:-}"  # Optional: comma-separated agent names (e.g. "gemini,claude")
 TARGET_PANE="${4:-}"  # Optional: tmux pane ID for monitor split
+TEMPLATE_OVERRIDE="${5:-${COLLAB_TEMPLATE:-}}"  # Optional: explicit template name (else auto-detect)
 API="http://localhost:23000"
 HOST_ID="${ENSEMBLE_HOST_ID:-local}"
+
+# ─── Template auto-detection (fixes dead expert-injection code path) ───
+# Previously: no template was ever passed → buildPromptPreview fell through to
+# default LEAD/WORKER instructions → expert mental-models in collab-templates.json
+# (25 `expert` tags, 7 templates) NEVER loaded. 0/24 historical prompts had
+# EXPERT MENTAL MODEL. Now: keyword match on task description selects template,
+# user can override via env COLLAB_TEMPLATE or 5th positional arg.
+detect_template() {
+  local task_lower
+  task_lower=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  if [ -n "$TEMPLATE_OVERRIDE" ]; then
+    printf '%s' "$TEMPLATE_OVERRIDE"; return
+  fi
+  # Priority order — more specific first
+  if echo "$task_lower" | grep -qE '\b(ultrareview|ultra.review|4.agent.review|security.review)\b'; then
+    printf 'ultrareview'; return
+  fi
+  if echo "$task_lower" | grep -qE '\b(premium.quad|premium quad|critical|live.trading|production.deploy)\b'; then
+    printf 'premium-quad'; return
+  fi
+  if echo "$task_lower" | grep -qE '\b(adversarial|red.team|red team|stress.test)\b'; then
+    printf 'adversarial'; return
+  fi
+  if echo "$task_lower" | grep -qE '\b(crypto.strategy|trading.strategy|backtest|paper.trading|backtesting)\b'; then
+    printf 'crypto-strategy'; return
+  fi
+  if echo "$task_lower" | grep -qE '\b(deep.research|deep.dive|research|raziskava|investigate|forensic|analyze|audit)\b'; then
+    printf 'deep-research'; return
+  fi
+  if echo "$task_lower" | grep -qE '\b(debug|bug|fix|troubleshoot|error|crash|broken|popravi)\b'; then
+    printf 'debug'; return
+  fi
+  if echo "$task_lower" | grep -qE '\b(implement|build|develop|naredi|code|create.*feature|add.*endpoint)\b'; then
+    printf 'implement'; return
+  fi
+  # No template → agents still get sensible LEAD/WORKER defaults (no expert)
+  printf ''
+}
+TEMPLATE_NAME="$(detect_template "$TASK")"
 
 # ─── Colors ───
 G='\033[92m'; C='\033[96m'; D='\033[2m'; W='\033[97m'; BD='\033[1m'; R='\033[0m'
@@ -84,7 +124,7 @@ fi
 # ─── 2. Create team (use env vars to avoid quoting hell) ───
 TEAM_NAME="collab-$(python3 -c 'import random,time; print(str(time.time_ns()//1000000)+"-"+str(random.randint(1000,9999)))')"
 PAYLOAD_FILE=$(mktemp)
-TNAME="$TEAM_NAME" TDESC="$TASK" TCWD="$CWD" THOST="$HOST_ID" TAGENTS="$AGENTS" PFILE="$PAYLOAD_FILE" python3 -c "
+TNAME="$TEAM_NAME" TDESC="$TASK" TCWD="$CWD" THOST="$HOST_ID" TAGENTS="$AGENTS" TTEMPLATE="$TEMPLATE_NAME" PFILE="$PAYLOAD_FILE" python3 -c "
 import json, os
 agents_str = os.environ.get('TAGENTS', '')
 if agents_str:
@@ -114,8 +154,14 @@ payload = {
 }
 if staged:
     payload['staged'] = True
+# Fix: pass templateName so ensemble-service::buildPromptPreview actually
+# loads the template and injects expert mental models into agent prompts.
+tmpl = os.environ.get('TTEMPLATE', '').strip()
+if tmpl:
+    payload['templateName'] = tmpl
 json.dump(payload, open(os.environ['PFILE'], 'w'))
 "
+[ -n "$TEMPLATE_NAME" ] && echo -e "  ${D}Template: ${TEMPLATE_NAME}${R}"
 RESULT=$(curl -sf -X POST "$API/api/ensemble/teams" \
   -H "Content-Type: application/json" \
   -d @"$PAYLOAD_FILE")
@@ -133,8 +179,20 @@ TEAM_ID_FILE="$(collab_team_id_file "$TEAM_ID")"
 mkdir -p "$RUNTIME_DIR" "$(dirname "$MESSAGES_FILE")" "$(dirname "$FEED_FILE")"
 touch "$MESSAGES_FILE"
 printf '%s\n' "$TEAM_ID" > "$TEAM_ID_FILE"
-# Atomic write to shared latest-team-id file — prevents race where two
-# concurrent launches clobber the file and a caller reads the other's id.
+
+# ─── State machine marker (observable lifecycle) ───
+# Writers move through creating → active → finishing → finished → cleaned.
+# Readers query state without piecing together PID tables.
+STATE_FILE="$RUNTIME_DIR/.state"
+printf 'creating\n' > "$STATE_FILE"
+
+# ─── Shared latest-team-id: per-launcher-PID file (zero race) + global fallback ───
+# Parent that invoked this script as a subprocess should read /tmp/collab-team-$PPID.txt
+# to get its OWN team-id, not a concurrent launch's. Global /tmp/collab-team-id.txt
+# kept for backward compat but atomically written.
+PARENT_PID="${PPID:-0}"
+PER_PARENT_FILE="/tmp/collab-team-${PARENT_PID}.txt"
+printf '%s\n' "$TEAM_ID" > "$PER_PARENT_FILE"
 LATEST_TMP=$(mktemp /tmp/collab-team-id.XXXXXX)
 printf '%s\n' "$TEAM_ID" > "$LATEST_TMP"
 mv -f "$LATEST_TMP" /tmp/collab-team-id.txt
@@ -195,8 +253,10 @@ done
 MC=$(wc -l < "$MESSAGES_FILE" 2>/dev/null | tr -d ' ' || echo "0")
 if [ "${MC:-0}" -gt "0" ]; then
   echo -e "\r  ${CHECK} Agents communicating ${D}(${MC} messages)${R}"
+  printf 'active\n' > "$STATE_FILE"
 else
   echo -e "\r  ${SPIN} Agents warming up...       "
+  printf 'active\n' > "$STATE_FILE"
 fi
 
 # ─── Output ───
