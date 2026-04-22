@@ -133,8 +133,11 @@ TEAM_ID_FILE="$(collab_team_id_file "$TEAM_ID")"
 mkdir -p "$RUNTIME_DIR" "$(dirname "$MESSAGES_FILE")" "$(dirname "$FEED_FILE")"
 touch "$MESSAGES_FILE"
 printf '%s\n' "$TEAM_ID" > "$TEAM_ID_FILE"
-# Also write to a well-known location so callers can find the latest team ID
-printf '%s\n' "$TEAM_ID" > /tmp/collab-team-id.txt
+# Atomic write to shared latest-team-id file — prevents race where two
+# concurrent launches clobber the file and a caller reads the other's id.
+LATEST_TMP=$(mktemp /tmp/collab-team-id.XXXXXX)
+printf '%s\n' "$TEAM_ID" > "$LATEST_TMP"
+mv -f "$LATEST_TMP" /tmp/collab-team-id.txt
 echo -e "  ${CHECK} Team created ${D}(${TEAM_NAME})${R}"
 
 # ─── 3. Bridge (writes its own PID file via single-instance guard) ───
@@ -161,13 +164,18 @@ else
   MONITOR_MODE="session"
 fi
 
-# ─── 5. Background poller ───
+# ─── 5. Background poller (self-exits on .finished marker) ───
+FINISHED_MARKER="$RUNTIME_DIR/.finished"
 nohup bash -c '
 TID="'"$TEAM_ID"'"
 MESSAGES_FILE="'"$MESSAGES_FILE"'"
 FEED_FILE="'"$FEED_FILE"'"
+FINISHED="'"$FINISHED_MARKER"'"
 S=0
 while true; do
+  # Auto-exit once ensemble-service writes the finish marker — prevents
+  # zombie tail-feed loops (47 observed in pre-fix forensics).
+  [ -f "$FINISHED" ] && exit 0
   M=$(wc -l < "$MESSAGES_FILE" 2>/dev/null | tr -d " "); [ -z "$M" ] && M=0
   if [ "$M" -gt "$S" ]; then
     tail -n +"$((S+1))" "$MESSAGES_FILE" >> "$FEED_FILE" 2>/dev/null
