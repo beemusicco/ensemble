@@ -125,6 +125,7 @@ export function isPoliteAckPhrase(content: string): boolean {
   const norm = normalizeForSemanticHash(content)
   if (norm.length === 0 || norm.length > 180) return false
   const ACK_PATTERNS = [
+    // English
     /\bidle\b/,
     /\back(nowledge(d)?|nowledging)\b/,
     /\bstanding\s+by\b/,
@@ -133,11 +134,19 @@ export function isPoliteAckPhrase(content: string): boolean {
     /\blet\s+me\s+know\s+(how|if|when|what)/,
     /\bhow\s+can\s+i\s+(help|assist|support)/,
     /\bwaiting\s+(for|on)\s+(your|further|next)/,
-    /\bzaključeno\.?$/,
     /\bon\s+standby\b/,
     /\bno\s+(new|further)\s+(update|action|finding)/,
     /\b(still|just)\s+(monitoring|observing|watching)/,
     /^(ok|okay|got it|understood|noted|roger|will do|sure|alright)[.!]?$/i,
+    // Slovenian
+    /\bzaključeno\.?$/,
+    /\bpripravljen(a)?\s+(sem|da)\s+(pomag|nadaljuj|začn)/,
+    /\bčakam\s+(na\s+)?(navodila|nasledn|vaš|dodatn)/,
+    /\bna\s+voljo\s+(sem|za)/,
+    /\bsvoje\s+naloge\s+(sem\s+)?zaključil/,
+    /\bv\s+mirovanju\b/,
+    /\brazumem\.?$/,
+    /\bbrez\s+(novih|nadaljnjih)\s+(opazk|ugotov|spremem)/,
   ]
   return ACK_PATTERNS.some(p => p.test(norm))
 }
