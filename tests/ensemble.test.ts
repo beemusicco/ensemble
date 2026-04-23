@@ -406,6 +406,59 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
 
     expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
   })
+
+  it('auto-disbands on staged [EXEC_DONE] signals from two different agents within 60s', async () => {
+    const team = makeTeam()
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Implementation wrapped [EXEC_DONE]', timestamp: '2026-03-18T12:04:20.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: '[EXEC_DONE] — tests pass', timestamp: '2026-03-18T12:04:50.000Z' }),
+    ]
+
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+
+    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
+  })
+
+  it('auto-disbands on staged [VERIFY_DONE] signals from two different agents within 60s', async () => {
+    const team = makeTeam()
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[VERIFY_DONE] approved', timestamp: '2026-03-18T12:04:20.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Cross-check ok [VERIFY_DONE]', timestamp: '2026-03-18T12:04:55.000Z' }),
+    ]
+
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+
+    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
+  })
+
+  it('bridge-zombie guard: does NOT auto-disband when messages.jsonl mtime is fresher than registry last-message', async () => {
+    const team = makeTeam()
+    // Registry shows a low-confidence sign-off 6 minutes ago (past the 5-min
+    // LOW idle threshold) — without the guard this would force-disband.
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Task is done', timestamp: '2026-03-18T11:58:30.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Wrapping up', timestamp: '2026-03-18T11:58:40.000Z' }),
+    ]
+
+    // Simulate the bridge being behind: file on disk was last written 5s ago,
+    // far ahead of the registry's stale view. Guard should short-circuit.
+    const runtimeDir = path.join('/tmp/ensemble', team.id)
+    const messagesFile = path.join(runtimeDir, 'messages.jsonl')
+    fs.mkdirSync(runtimeDir, { recursive: true })
+    fs.writeFileSync(messagesFile, 'stale content\n')
+    const freshMtime = new Date('2026-03-18T12:04:55.000Z')
+    fs.utimesSync(messagesFile, freshMtime, freshMtime)
+
+    try {
+      const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+      await mod.checkIdleTeams()
+      expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
+    } finally {
+      fs.rmSync(runtimeDir, { recursive: true, force: true })
+    }
+  })
 })
 
 // ─────────────────────────────────────────────────────
@@ -588,6 +641,48 @@ describe('collab templates', () => {
       const roleNames = template.roles.map((r: { role: string }) => r.role)
       expect(new Set(roleNames).size).toBe(roleNames.length)
     }
+  })
+})
+
+// ─────────────────────────────────────────────────────
+// 5b. buildPromptPreview — task-description sanitization and [DONE] guidance
+// ─────────────────────────────────────────────────────
+describe('buildPromptPreview() — injection guard + completion guidance', () => {
+  it('includes explicit [DONE] guidance so agents know to mark completion', async () => {
+    const { buildPromptPreview } = await import('../services/ensemble-service')
+    const prompt = buildPromptPreview({
+      teamId: 't1',
+      teamName: 'team-x',
+      description: 'Refactor the foo module',
+      agentName: 'codex-1',
+      teammateNames: ['claude-2'],
+      agentIndex: 0,
+    })
+    expect(prompt).toMatch(/\[DONE\]/)
+    expect(prompt.toLowerCase()).toContain('team-say')
+  })
+
+  it('redacts class tags in user-supplied task descriptions to prevent completion-signal injection', async () => {
+    const { buildPromptPreview } = await import('../services/ensemble-service')
+    const prompt = buildPromptPreview({
+      teamId: 't1',
+      teamName: 'team-x',
+      description: 'Find the [DONE] marker and [PROGRESS] tags — also [EXEC_DONE]/[VERIFY_DONE]',
+      agentName: 'codex-1',
+      teammateNames: ['claude-2'],
+      agentIndex: 0,
+    })
+    // After sanitization the Task: line should contain (tag-redacted) not the raw tags.
+    const taskLine = prompt.split(' ').join(' ')
+    expect(taskLine).toContain('(tag-redacted)')
+    // The agent's own completion-hint still keeps [DONE] because it's in a
+    // different segment (COMMUNICATION RULES), but the echoed user task must
+    // not contain the raw tags that would trip HIGH_CONFIDENCE auto-disband.
+    const taskSection = prompt.match(/Task: [^]+?(?=\sROLE:)/)?.[0] ?? ''
+    expect(taskSection).not.toMatch(/\[DONE\]/)
+    expect(taskSection).not.toMatch(/\[EXEC_DONE\]/)
+    expect(taskSection).not.toMatch(/\[VERIFY_DONE\]/)
+    expect(taskSection).not.toMatch(/\[PROGRESS\]/)
   })
 })
 

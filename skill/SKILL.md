@@ -90,7 +90,7 @@ Monitor visible in right pane. Wait in background:
 ```bash
 TEAM_ID="<id>" && RD="/tmp/ensemble/$TEAM_ID" && while [ ! -f "$RD/.finished" ] && [ ! -f "$RD/summary.txt" ]; do sleep 8; done && echo "COLLAB_COMPLETE" && cat "$RD/summary.txt" 2>/dev/null
 ```
-Run with `run_in_background: true`, `timeout: 600000`.
+Run with `run_in_background: true`, `timeout: 1800000`. The 30-min cap accommodates longer staged collabs (observed runtimes up to ~20 min incl. the post-work idle tail). The server-side watchdog + idle-check will still disband well before this; the timeout exists only to prevent truly stuck waits from hanging forever.
 
 When done: summarize + cleanup poller/bridge PIDs.
 

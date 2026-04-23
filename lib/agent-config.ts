@@ -31,7 +31,12 @@ export function clearAgentsConfigCache(): void {
 
 /**
  * Resolve a program string (e.g. "codex", "claude code", "claude-code") to its AgentProgram config.
- * Falls back to "claude" if no match found.
+ * Throws on unknown program name — silent fallback hid mis-spawns (e.g. "sonnet"/"haiku"
+ * not in agents.json silently resolved to claude/Opus, so premium-quad spawned 4×Opus).
+ *
+ * Substring match intentionally preferred over longest-key match: existing call sites pass
+ * strings like "claude code" that must match "claude". New keys that are substrings of
+ * existing ones (none today) would need explicit precedence handling.
  */
 export function resolveAgentProgram(program: string): AgentProgram {
   const config = loadAgentsConfig()
@@ -45,17 +50,10 @@ export function resolveAgentProgram(program: string): AgentProgram {
     if (p.includes(key)) return agent
   }
 
-  // Default to claude
-  return config['claude'] || {
-    name: program,
-    command: program.toLowerCase(),
-    flags: [],
-    readyMarker: '❯',
-    inputMethod: 'sendKeys' as const,
-    color: 'white',
-    icon: '○',
-    postReadyDelayMs: 2000,
-  }
+  throw new Error(
+    `Unknown agent program: "${program}". Available: ${Object.keys(config).join(', ')}. ` +
+    `Add a definition to agents.json (or set ENSEMBLE_AGENTS_CONFIG) before spawning this agent.`
+  )
 }
 
 /**

@@ -70,6 +70,7 @@ export interface StagedWorkflowConfig {
 export interface CollabTemplateRole {
   role: string
   focus: string
+  expert?: string
 }
 
 export interface CollabTemplate {

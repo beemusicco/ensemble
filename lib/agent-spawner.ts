@@ -5,9 +5,38 @@
  */
 
 import { v4 as uuidv4 } from 'uuid'
+import fs from 'fs'
+import path from 'path'
 import { getRuntime } from './agent-runtime'
 import { getSelfHostId } from './hosts-config'
-import { buildAgentCommand } from './agent-config'
+import { buildAgentCommand, resolveAgentProgram } from './agent-config'
+
+// Codex CLI 0.123+ prompts "Do you trust the contents of this directory?" on
+// spawn for any untrusted CWD. The interactive dialog hangs the tmux-pasted
+// prompt flow, so we pre-register the CWD (and its realpath, since macOS maps
+// /tmp → /private/tmp) in ~/.codex/config.toml before spawning a codex agent.
+function ensureCodexTrust(cwd: string): void {
+  const cfgPath = path.join(process.env['HOME'] ?? '', '.codex/config.toml')
+  if (!process.env['HOME']) return
+  const dirs = new Set<string>()
+  try { dirs.add(path.resolve(cwd)) } catch { /* ignore */ }
+  try { dirs.add(fs.realpathSync(cwd)) } catch { /* cwd may not exist */ }
+  try {
+    const existing = fs.existsSync(cfgPath) ? fs.readFileSync(cfgPath, 'utf-8') : ''
+    const toAdd: string[] = []
+    for (const d of dirs) {
+      if (!existing.includes(`[projects."${d}"]`)) {
+        toAdd.push(`\n[projects."${d}"]\ntrust_level = "trusted"\n`)
+      }
+    }
+    if (toAdd.length) {
+      fs.appendFileSync(cfgPath, toAdd.join(''))
+      console.log(`[Spawner] Marked ${toAdd.length} dir(s) trusted in codex config: ${[...dirs].join(', ')}`)
+    }
+  } catch (err) {
+    console.warn(`[Spawner] Failed to update codex trust for ${cwd}:`, (err as Error).message)
+  }
+}
 
 export interface SpawnedAgent {
   id: string
@@ -50,6 +79,12 @@ export async function spawnLocalAgent(options: SpawnAgentOptions): Promise<Spawn
 
   // Small delay for session init
   await new Promise(r => setTimeout(r, 300))
+
+  // Pre-trust CWD for codex-family agents so 0.123+ directory-trust dialog
+  // doesn't block the spawn. No-op for non-codex programs.
+  if (resolveAgentProgram(options.program).command === 'codex') {
+    ensureCodexTrust(cwd)
+  }
 
   // Start the AI program
   const startCommand = resolveStartCommand(options.program)

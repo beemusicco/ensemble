@@ -171,6 +171,49 @@ describe('AgentWatchdog', () => {
     watchdog.stop()
   })
 
+  it('force-disbands when every active agent has been marked stalled', async () => {
+    const disbandTeam = vi.fn(async () => {})
+    teams = [makeTeam({
+      agents: [
+        { agentId: 'agent-1', name: 'codex-1', program: 'codex', role: 'lead', hostId: 'local', status: 'active' },
+        { agentId: 'agent-2', name: 'claude-2', program: 'claude', role: 'worker', hostId: 'local', status: 'active' },
+      ],
+    })]
+    messages = [
+      makeMessage({ id: 'm1', from: 'codex-1', timestamp: '2026-03-19T10:00:00.000Z' }),
+      makeMessage({ id: 'm2', from: 'claude-2', timestamp: '2026-03-19T10:00:00.000Z' }),
+    ]
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const watchdog = new AgentWatchdog({
+      loadTeams: () => teams,
+      getMessages: () => messages,
+      appendMessage: (_teamId, message) => appended.push(message),
+      disbandTeam,
+      getRuntime: () => ({ sendKeys, pasteFromFile }),
+      resolveAgentProgram: () => ({ inputMethod: 'sendKeys' }),
+      isSelf: () => true,
+      getHostById: () => undefined,
+      postRemoteSessionCommand,
+      collabDeliveryFile: (teamId, sessionName) => `/tmp/${teamId}/${sessionName}.txt`,
+      now: () => nowMs,
+      pollIntervalMs: 60_000,
+      nudgeAfterMs: 90_000,
+      stallAfterMs: 180_000,
+    })
+
+    await watchdog.poll()            // seed state
+    nowMs += 91_000
+    await watchdog.poll()            // both agents get nudged
+    nowMs += 181_000
+    await watchdog.poll()            // both flip to stalled → force-disband
+
+    expect(disbandTeam).toHaveBeenCalledWith('team-1', 'all agents stalled')
+    expect(appended.some(m => m.content.includes('Force-disband: all agents stalled'))).toBe(true)
+    watchdog.stop()
+    warnSpy.mockRestore()
+  })
+
   it('reads watchdog thresholds from environment variables', () => {
     process.env.ENSEMBLE_WATCHDOG_NUDGE_MS = '1234'
     process.env.ENSEMBLE_WATCHDOG_STALL_MS = '5678'

@@ -62,10 +62,19 @@ tmux list-sessions -F '#{session_name}' 2>/dev/null | while read -r session; do
   fi
 done
 
-# Phase 6: write final state marker
+# Phase 6: write final state marker AND .finished marker.
+# .finished is what skill-level background waits look for; writing it here
+# ensures that a manual terminate (without --disband) still unblocks the
+# caller instead of the skill wait hanging until its outer timeout.
 FINAL_TMP=$(mktemp "$RD/.state.XXXXXX")
 printf 'finished\n' > "$FINAL_TMP"
 mv -f "$FINAL_TMP" "$RD/.state"
+
+if [ ! -f "$RD/.finished" ]; then
+  FIN_TMP=$(mktemp "$RD/.finished.XXXXXX")
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$FIN_TMP"
+  mv -f "$FIN_TMP" "$RD/.finished"
+fi
 
 if [ "$KILLED_VIA_PGID" = "1" ]; then
   echo "[terminate] team $TEAM_ID: process group signalled"

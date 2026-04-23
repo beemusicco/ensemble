@@ -12,12 +12,42 @@
   "claude": {
     "name": "claude",
     "command": "claude",
-    "flags": ["--dangerously-skip-permissions"],
+    "flags": ["--model", "opus", "--dangerously-skip-permissions"],
     "readyMarker": "❯",
     "inputMethod": "pasteFromFile",
     "color": "green",
     "icon": "●",
     "postReadyDelayMs": 3000
+  },
+  "sonnet": {
+    "name": "sonnet",
+    "command": "claude",
+    "flags": ["--model", "sonnet", "--dangerously-skip-permissions"],
+    "readyMarker": "❯",
+    "inputMethod": "pasteFromFile",
+    "color": "cyan",
+    "icon": "◉",
+    "postReadyDelayMs": 3000
+  },
+  "haiku": {
+    "name": "haiku",
+    "command": "claude",
+    "flags": ["--model", "haiku", "--dangerously-skip-permissions"],
+    "readyMarker": "❯",
+    "inputMethod": "pasteFromFile",
+    "color": "white",
+    "icon": "◐",
+    "postReadyDelayMs": 3000
+  },
+  "codex-mini": {
+    "name": "codex-mini",
+    "command": "codex",
+    "flags": ["--model", "gpt-5.4-mini", "--full-auto"],
+    "readyMarker": "›",
+    "inputMethod": "pasteFromFile",
+    "color": "blue",
+    "icon": "◇",
+    "postReadyDelayMs": 2000
   },
   "aider": {
     "name": "aider",

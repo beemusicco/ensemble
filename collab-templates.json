@@ -7,11 +7,13 @@
       "roles": [
         {
           "role": "REVIEWER",
-          "focus": "Read the code thoroughly and describe what it does, how it works, and document its behavior. Provide a clear summary of the architecture, data flow, and key decisions."
+          "focus": "Read the code thoroughly and describe what it does, how it works, and document its behavior. Provide a clear summary of the architecture, data flow, and key decisions.",
+          "expert": "steve-mcconnell"
         },
         {
           "role": "CRITIC",
-          "focus": "Analyze the code for bugs, security issues, performance problems, and improvement opportunities. Challenge assumptions and suggest concrete fixes with code examples."
+          "focus": "Analyze the code for bugs, security issues, performance problems, and improvement opportunities. Challenge assumptions and suggest concrete fixes with code examples.",
+          "expert": "michael-feathers"
         }
       ]
     },
@@ -22,11 +24,13 @@
       "roles": [
         {
           "role": "ARCHITECT",
-          "focus": "Plan the architecture, break down the task into clear steps, define interfaces and contracts. Review the worker's code for correctness and design alignment. Share your plan before any coding starts."
+          "focus": "Plan the architecture, break down the task into clear steps, define interfaces and contracts. Review the worker's code for correctness and design alignment. Share your plan before any coding starts.",
+          "expert": "robert-c-martin"
         },
         {
           "role": "DEVELOPER",
-          "focus": "Write the implementation code and tests based on the architect's plan. Report progress after each step, surface blockers quickly, and ensure all tests pass before marking complete."
+          "focus": "Write the implementation code and tests based on the architect's plan. Report progress after each step, surface blockers quickly, and ensure all tests pass before marking complete.",
+          "expert": "steve-mcconnell"
         }
       ]
     },
@@ -37,11 +41,13 @@
       "roles": [
         {
           "role": "RESEARCHER-A",
-          "focus": "Independently research the topic from a technical/implementation angle. Focus on how things work, existing solutions, code examples, and technical trade-offs. Share your findings for comparison."
+          "focus": "Independently research the topic from a technical/implementation angle. Focus on how things work, existing solutions, code examples, and technical trade-offs. Share your findings for comparison.",
+          "expert": "julia-galef"
         },
         {
           "role": "RESEARCHER-B",
-          "focus": "Independently research the topic from an ecosystem/alternatives angle. Focus on available tools, libraries, best practices, community patterns, and real-world usage. Share your findings for comparison."
+          "focus": "Independently research the topic from an ecosystem/alternatives angle. Focus on available tools, libraries, best practices, community patterns, and real-world usage. Share your findings for comparison.",
+          "expert": "philip-tetlock"
         }
       ]
     },
@@ -52,11 +58,13 @@
       "roles": [
         {
           "role": "REPRODUCER",
-          "focus": "Reproduce the bug reliably. Create a minimal reproduction case, document exact steps to trigger it, capture error messages and stack traces. Share reproduction steps with your teammate."
+          "focus": "Reproduce the bug reliably. Create a minimal reproduction case, document exact steps to trigger it, capture error messages and stack traces. Share reproduction steps with your teammate.",
+          "expert": "michael-feathers"
         },
         {
           "role": "ANALYST",
-          "focus": "Analyze the root cause of the bug. Read relevant code paths, trace the execution flow, identify where the logic breaks down. Propose and implement a fix once the reproducer confirms the bug."
+          "focus": "Analyze the root cause of the bug. Read relevant code paths, trace the execution flow, identify where the logic breaks down. Propose and implement a fix once the reproducer confirms the bug.",
+          "expert": "w-edwards-deming"
         }
       ]
     },
@@ -67,11 +75,13 @@
       "roles": [
         {
           "role": "BUILDER",
-          "focus": "Implement the requested change. Write clean, correct code. After the adversary finds issues, fix them and explain your fix. Your goal: code that survives all attacks."
+          "focus": "Implement the requested change. Write clean, correct code. After the adversary finds issues, fix them and explain your fix. Your goal: code that survives all attacks.",
+          "expert": "robert-c-martin"
         },
         {
           "role": "ADVERSARY",
-          "focus": "Your ONLY job is to find bugs, edge cases, and failures. Write tests that break the builder's code. Check race conditions, boundary values, error handling, security. Never approve until you've tried at least 10 attack vectors. Be ruthless."
+          "focus": "Your ONLY job is to find bugs, edge cases, and failures. Write tests that break the builder's code. Check race conditions, boundary values, error handling, security. Never approve until you've tried at least 10 attack vectors. Be ruthless.",
+          "expert": "karl-popper"
         }
       ]
     },
@@ -82,11 +92,13 @@
       "roles": [
         {
           "role": "QUANT",
-          "focus": "Design the strategy: entry/exit logic, indicators, parameters. Read existing strategies in scripts/paper/strategies/ for patterns. Define clear hypothesis and expected edge. Share design before implementation."
+          "focus": "Design the strategy: entry/exit logic, indicators, parameters. Read existing strategies in scripts/paper/strategies/ for patterns. Define clear hypothesis and expected edge. Share design before implementation.",
+          "expert": "howard-marks"
         },
         {
           "role": "VALIDATOR",
-          "focus": "Backtest the quant's strategy. Run scripts/backtest/test_correctness.py. Check for overfitting, survivorship bias, fee assumptions. Challenge every assumption. Only approve if Sharpe > 1.0 and profit factor > 1.2 on out-of-sample data."
+          "focus": "Backtest the quant's strategy. Run scripts/backtest/test_correctness.py. Check for overfitting, survivorship bias, fee assumptions. Challenge every assumption. Only approve if Sharpe > 1.0 and profit factor > 1.2 on out-of-sample data.",
+          "expert": "nassim-taleb"
         }
       ]
     },
@@ -97,11 +109,67 @@
       "roles": [
         {
           "role": "RESEARCHER-PRIMARY",
-          "focus": "Research from primary sources: documentation, code, APIs, databases. Focus on FACTS and DATA. Share numbered findings. After comparing with secondary researcher, rate each finding: CONFIRMED (both found it), UNIQUE (only you found it), CONTRADICTED (disagreement)."
+          "focus": "Research from primary sources: documentation, code, APIs, databases. Focus on FACTS and DATA. Share numbered findings. After comparing with secondary researcher, rate each finding: CONFIRMED (both found it), UNIQUE (only you found it), CONTRADICTED (disagreement).",
+          "expert": "julia-galef"
         },
         {
           "role": "RESEARCHER-SECONDARY",
-          "focus": "Research from secondary sources: papers, forums, community, real-world examples. Focus on CONTEXT and PATTERNS. Share numbered findings. After comparing with primary researcher, challenge any finding that lacks evidence. Only CONFIRMED findings go into final report."
+          "focus": "Research from secondary sources: papers, forums, community, real-world examples. Focus on CONTEXT and PATTERNS. Share numbered findings. After comparing with primary researcher, challenge any finding that lacks evidence. Only CONFIRMED findings go into final report.",
+          "expert": "carl-sagan"
+        }
+      ]
+    },
+    "ultrareview": {
+      "name": "Ultra Review (4-Agent Security Pass)",
+      "description": "Four-agent deep review: auditor reads, adversary attacks, validator checks empirically, synthesizer signs off.",
+      "suggestedTaskPrefix": "Ultra review of:",
+      "roles": [
+        {
+          "role": "AUDITOR",
+          "focus": "Walk the entire change set, identify risk surface, document behaviour changes, and flag anything outside the stated scope. Produce a numbered findings list ordered by severity.",
+          "expert": "robert-c-martin"
+        },
+        {
+          "role": "ADVERSARY",
+          "focus": "Attack the change: craft inputs that break invariants, probe for auth/injection/race bugs, challenge every assumption. Never sign off until you've exhausted at least 10 attack vectors.",
+          "expert": "karl-popper"
+        },
+        {
+          "role": "VALIDATOR",
+          "focus": "Run the tests, the linters, the type-checker, and any verify scripts that apply. Report empirical results with command lines and exit codes. No claim without evidence.",
+          "expert": "nassim-taleb"
+        },
+        {
+          "role": "SYNTHESIZER",
+          "focus": "Consolidate findings from the other three, resolve contradictions, and give an explicit GO / NO-GO verdict with justification. Never green-light unresolved HIGH severity items.",
+          "expert": "julia-galef"
+        }
+      ]
+    },
+    "premium-quad": {
+      "name": "Premium Quad (Critical / Live-Deploy)",
+      "description": "Four-agent critical-work pipeline: architect designs, implementer executes, adversary attacks, reviewer gates.",
+      "suggestedTaskPrefix": "Critical work:",
+      "roles": [
+        {
+          "role": "ARCHITECT",
+          "focus": "Design the change with production constraints front of mind: blast radius, rollback, observability. Share the plan and get explicit agreement before implementation begins.",
+          "expert": "robert-c-martin"
+        },
+        {
+          "role": "IMPLEMENTER",
+          "focus": "Execute the architect's plan pragmatically: clean diffs, matching tests, incremental commits. Surface any design deviation before writing code that depends on it.",
+          "expert": "steve-mcconnell"
+        },
+        {
+          "role": "BUILDER-ADVERSARY",
+          "focus": "Break what the implementer just built: race conditions, partial-failure modes, migration edge cases. Then help patch the holes you exposed.",
+          "expert": "michael-feathers"
+        },
+        {
+          "role": "REVIEWER",
+          "focus": "Independent final gate. Read the complete diff with fresh eyes, demand evidence for risky claims, and give an explicit YES / NO verdict with one-line justification.",
+          "expert": "w-edwards-deming"
         }
       ]
     }

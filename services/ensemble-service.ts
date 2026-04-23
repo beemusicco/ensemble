@@ -23,7 +23,7 @@ import { AgentWatchdog } from '../lib/agent-watchdog'
 import {
   collabPromptFile, collabDeliveryFile, collabSummaryFile,
   collabRuntimeDir, collabFinishedMarker, collabBridgePosted,
-  collabBridgeResult, ensureCollabDirs,
+  collabBridgeResult, ensureCollabDirs, collabMessagesFile,
 } from '../lib/collab-paths'
 import fs from 'fs'
 import path from 'path'
@@ -49,6 +49,11 @@ const HIGH_CONFIDENCE_COMPLETION = [
   /\[DONE\]/i,
   /\[COMPLETE\]/i,
   /\[FINISHED\]/i,
+  // Staged-workflow phase markers — agents emit these when staged EXEC/VERIFY
+  // phases finish. Without them, even a clean staged run waits the full
+  // 5-minute LOW_CONFIDENCE idle tax before auto-disband fires.
+  /\[EXEC_DONE\]/i,
+  /\[VERIFY_DONE\]/i,
 ]
 
 const LOW_CONFIDENCE_COMPLETION = [
@@ -147,7 +152,24 @@ class EnsembleService {
     const activeAgents = team.agents.filter(agent => agent.status === 'active')
     if (activeAgents.length === 0) return false
 
-    const idleForMs = Date.now() - lastTimestamp
+    // Bridge-zombie guard: if ensemble-bridge.sh has died but agents are still
+    // writing to messages.jsonl, the registry lastTimestamp freezes at the
+    // moment the bridge stopped forwarding — which would cause a false
+    // auto-disband while agents are actively working. Compare against the
+    // on-disk file mtime and take the more-recent one as the real "last
+    // activity" signal. If file is newer than registry by >10s, we're in
+    // zombie mode — log it and trust the filesystem.
+    let effectiveLastTimestamp = lastTimestamp
+    try {
+      const stat = fs.statSync(collabMessagesFile(team.id))
+      const fileMtime = stat.mtimeMs
+      if (fileMtime - lastTimestamp > 10_000) {
+        console.warn(`[Ensemble] Bridge-zombie detected for team ${team.id}: file mtime ${Math.round((fileMtime - lastTimestamp) / 1000)}s ahead of registry — using file mtime`)
+        effectiveLastTimestamp = fileMtime
+      }
+    } catch { /* file may not exist yet */ }
+
+    const idleForMs = Date.now() - effectiveLastTimestamp
     const activeAgentNames = new Set(activeAgents.map(agent => agent.name))
     const completionSignals = messages
       .filter(message => activeAgentNames.has(message.from) && this.getCompletionConfidence(message.content) !== null)
@@ -270,6 +292,60 @@ export function loadCollabTemplate(templateName?: string): CollabTemplatesFile['
   }
 }
 
+// Expert profile library lives outside the repo so adding/editing experts
+// doesn't churn the ensemble codebase. Override for tests via env var.
+const EXPERT_PROFILES_DIR = process.env['ENSEMBLE_EXPERT_PROFILES_DIR']
+  ?? path.join(process.env['HOME'] ?? '', '.openclaw/context-profiles/experts')
+
+export function loadExpertProfile(slug?: string): string | undefined {
+  if (!slug) return undefined
+  const safe = slug.replace(/[^a-z0-9._-]/gi, '')
+  if (!safe) return undefined
+  const file = path.join(EXPERT_PROFILES_DIR, `${safe}.md`)
+  try {
+    return fs.readFileSync(file, 'utf-8').trim()
+  } catch {
+    console.warn(`[Ensemble] Expert profile not found: ${safe} (${file})`)
+    return undefined
+  }
+}
+
+// Role-keyword → expert slug. Used when a template role has no explicit
+// `expert` field, so previously-authored templates still benefit from mental
+// models. Keep this minimal and keyword-driven; explicit > implicit.
+const ROLE_EXPERT_HINTS: Array<[RegExp, string]> = [
+  [/architect|designer|planner/i, 'robert-c-martin'],
+  [/developer|implementer|builder|engineer/i, 'steve-mcconnell'],
+  [/reviewer|auditor|critic/i, 'michael-feathers'],
+  [/adversary|red.?team|attacker/i, 'karl-popper'],
+  [/reproducer|debugger/i, 'michael-feathers'],
+  [/analyst|root.?cause/i, 'w-edwards-deming'],
+  [/quant|strategist/i, 'howard-marks'],
+  [/validator|risk/i, 'nassim-taleb'],
+  [/researcher|investigator|forensic/i, 'julia-galef'],
+  [/synthesizer|integrator/i, 'carl-sagan'],
+]
+
+export function autoSelectExpert(roleName: string): string | undefined {
+  for (const [re, slug] of ROLE_EXPERT_HINTS) {
+    if (re.test(roleName)) return slug
+  }
+  return undefined
+}
+
+// Strip class tags from user task description before injecting it into agent
+// prompts. Without this, a task containing "[DONE]" would fire HIGH-confidence
+// completion detection the moment the agent echoes it back — and "[PLAN]",
+// "[FINDING]", "[PROGRESS]", etc. would poison the watchdog's loop detector.
+// The architecture safety rails section documents this as "(tag-redacted)"
+// replacement; the shell test expects that exact string to appear here.
+function sanitizeTaskDescription(raw: string): string {
+  return raw.replace(
+    /\[(DONE|COMPLETE|FINISHED|EXEC_DONE|VERIFY_DONE|PLAN|PLAN_READY|FINDING|BLOCKER|REVIEW|PROGRESS|ACK|IDLE|STATUS)\]/gi,
+    '(tag-redacted)',
+  )
+}
+
 export function buildPromptPreview(params: {
   teamId: string
   teamName: string
@@ -283,8 +359,10 @@ export function buildPromptPreview(params: {
   const scriptsDir = path.join(__dirname, '..', 'scripts')
   const teamSayCmd = `${scriptsDir}/team-say.sh ${params.teamId} ${params.agentName} ${params.teammateNames[0] || 'team'}`
   const teamReadCmd = `${scriptsDir}/team-read.sh ${params.teamId}`
+  const safeDescription = sanitizeTaskDescription(params.description)
 
   let roleInstructions: string[]
+  let expertSlug: string | undefined
 
   if (template && params.agentIndex < template.roles.length) {
     const templateRole = template.roles[params.agentIndex]
@@ -292,6 +370,7 @@ export function buildPromptPreview(params: {
       `ROLE: ${templateRole.role}.`,
       templateRole.focus,
     ]
+    expertSlug = templateRole.expert ?? autoSelectExpert(templateRole.role)
   } else {
     const isLead = params.agentIndex === 0
     const roleName = isLead ? 'LEAD' : 'WORKER'
@@ -308,11 +387,18 @@ export function buildPromptPreview(params: {
           `After greeting, wait for the lead's plan before starting implementation work.`,
           `Once the lead shares a plan, execute it pragmatically, report what you changed, and surface blockers or test failures quickly.`,
         ]
+    expertSlug = isLead ? 'robert-c-martin' : 'steve-mcconnell'
   }
 
+  const expertBody = loadExpertProfile(expertSlug)
+  const expertBlock = expertBody
+    ? `EXPERT MENTAL MODEL (${expertSlug}):\n${expertBody}\n---\nAdopt this expert's frameworks, questions, and operating beliefs while executing the role below.\n`
+    : ''
+
   return [
+    expertBlock,
     `You are ${params.agentName} in team "${params.teamName}" with teammate ${params.teammateNames.join(', ')}.`,
-    `Task: ${params.description}`,
+    `Task: ${safeDescription}`,
     ...roleInstructions,
     `COMMUNICATION RULES:`,
     `1. Send findings: ${teamSayCmd} "your message"`,
@@ -321,8 +407,9 @@ export function buildPromptPreview(params: {
     `4. After EVERY team-say, run team-read to check for responses`,
     `5. If teammate shared findings, RESPOND to them`,
     `6. Keep alternating: analyze, share, read, respond, analyze`,
+    `7. When your part of the task is complete, emit [DONE] in a team-say message (literal brackets required) so the team can close cleanly. Do not linger with polite sign-offs after [DONE].`,
     `Start NOW: greet your teammate with team-say, then begin.`,
-  ].join(' ')
+  ].filter(Boolean).join(' ')
 }
 
 export async function createEnsembleTeam(
@@ -447,8 +534,13 @@ export async function createEnsembleTeam(
   if (activeAgents.length >= 2) {
     const runtime = getRuntime()
 
+    // 60s was tight for cold-starting claude with --model verification on a
+    // busy system — bumped to 120s, overridable via env for slow hosts.
+    const defaultReadyTimeout = Number.parseInt(
+      process.env['ENSEMBLE_READY_TIMEOUT_MS'] ?? '120000', 10,
+    ) || 120000
     const waitForReady = async (
-      sessionName: string, program: string, hostId?: string, maxWait = 60000,
+      sessionName: string, program: string, hostId?: string, maxWait = defaultReadyTimeout,
     ): Promise<boolean> => {
       const start = Date.now()
       const agentConfig = resolveAgentProgram(program)
@@ -462,9 +554,13 @@ export async function createEnsembleTeam(
               return true
             }
           } else {
+            // Claude CLI can pin persistent status banners to the bottom of
+            // the TUI (e.g. "You've used 83% of your weekly limit"), which
+            // pushes the ❯ ready marker above a 5-line tail window. Scan the
+            // full captured viewport — false positives are unlikely on a
+            // fresh session, and 50 lines covers the whole pane anyway.
             const output = await runtime.capturePane(sessionName, 50)
-            const lastLines = output.split('\n').slice(-5).join('\n')
-            if (lastLines.includes(readyMarker)) {
+            if (output.includes(readyMarker)) {
               console.log(`[Ensemble] ${sessionName} is ready (${Math.round((Date.now() - start) / 1000)}s)`)
               return true
             }
@@ -699,13 +795,13 @@ export async function sendTeamMessage(
  * picked up by the background watcher in the Claude Code session.
  * Mirrors the format from cli/monitor.ts disbandTeam().
  */
-export async function writeDisbandSummary(teamId: string): Promise<void> {
+export async function writeDisbandSummary(teamId: string): Promise<Record<string, string>> {
   const team = getTeam(teamId)
-  if (!team) return
+  if (!team) return {}
 
   const messages = getMessages(teamId)
   const agentMsgs = messages.filter(m => m.from !== 'ensemble' && m.from !== 'user')
-  if (agentMsgs.length === 0) return
+  if (agentMsgs.length === 0) return {}
 
   const now = new Date()
   const createdAt = new Date(team.createdAt)
@@ -714,7 +810,9 @@ export async function writeDisbandSummary(teamId: string): Promise<void> {
 
   const agents = [...new Set(agentMsgs.map(m => m.from))]
 
-  // Scrape token usage from each agent's tmux pane (best-effort)
+  // Scrape token usage from each agent's tmux pane (best-effort). Returned to
+  // the caller so disbandTeam can reuse it for the Telegram / observation
+  // payloads instead of running capture-pane twice per agent.
   const tokenUsageMap: Record<string, string> = {}
   await Promise.all(
     team.agents
@@ -740,25 +838,18 @@ export async function writeDisbandSummary(teamId: string): Promise<void> {
     `Task: ${team.description || 'unknown'}\nDuration: ${duration}\nMessages: ${agentMsgs.length}\n\n${summaryText}`,
   )
   console.log(`[Ensemble] Summary written to ${summaryFile}`)
+  return tokenUsageMap
 }
 
 export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team: EnsembleTeam }>> {
   const team = getTeam(teamId)
   if (!team) return { error: 'Team not found', status: 404 }
 
-  // Write summary before killing sessions so the Claude Code session can present it
-  await writeDisbandSummary(teamId)
-
-  // Scrape token usage BEFORE killing sessions (tmux panes disappear on kill)
-  const tokenUsageMap: Record<string, string> = {}
-  await Promise.all(
-    team.agents
-      .filter(a => a.status === 'active')
-      .map(async (agent) => {
-        const sessionName = `${team.name}-${agent.name}`
-        tokenUsageMap[agent.name] = await getAgentTokenUsage(sessionName)
-      })
-  )
+  // Write summary before killing sessions so the Claude Code session can
+  // present it. writeDisbandSummary already scraped tmux panes for token
+  // usage — reuse its result here so we don't run capture-pane twice per
+  // agent on disband.
+  const tokenUsageMap = await writeDisbandSummary(teamId)
 
   for (const agent of team.agents) {
     if (agent.status === 'active') {

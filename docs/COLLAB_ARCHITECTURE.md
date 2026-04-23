@@ -178,17 +178,29 @@ If a role lacks explicit `expert`, the function scores all experts by keyword ov
 
 ## 5. Watchdog (`lib/agent-watchdog.ts`)
 
-Runs as an interval loop inside the server. Per team, every `WATCHDOG_POLL_INTERVAL_MS`:
+Runs as an interval loop inside the server. Poll every `DEFAULT_POLL_INTERVAL_MS` (30 s); per team:
+
+| Trigger | Env var / constant | Default | Action |
+|---|---|---|---|
+| Idle since agent's last message | `ENSEMBLE_WATCHDOG_NUDGE_MS` / `DEFAULT_NUDGE_MS` | 90 s | nudge agent with `[DONE]`/`[PROGRESS]` prompt |
+| Still idle after nudge | `ENSEMBLE_WATCHDOG_STALL_MS` / `DEFAULT_STALL_MS` | 180 s after nudge | mark agent `stalledAt` |
+| **All** active agents are stalled | — | — | **disband** with `all agents stalled` |
+| Same pair of agents ping-ponging acks | `LOOP_WARN_THRESHOLD` | 6 | warn once |
+| Same ack loop continuing | `LOOP_DISBAND_THRESHOLD` | 8 | disband |
+| Triangular chatter | fixed `TRIANGULAR_WINDOW` | 9 msgs / 3+ senders / no progress | disband |
+| `isSemanticIdle(recent, 3)` true | — | 3 identical OR 3 ack phrases in last 4 | disband |
+
+Separate from the watchdog, the in-service **idle-checker** (`checkIdleTeams`, 15 s poll) closes teams on completion signals:
 
 | Trigger | Threshold | Action |
 |---|---|---|
-| No message in `WATCHDOG_NUDGE_AFTER_MS` | default 5 min | send nudge to lead agent |
-| No message in `WATCHDOG_STALL_AFTER_MS` | default 12 min | disband with "stalled" |
-| Same pair of agents ping-ponging acks | `loopWarnThreshold=3` | warn once |
-| Same ack loop continuing | `loopDisbandThreshold=6` | disband |
-| `isSemanticIdle(recent, 3)` true | 3 identical OR 3 ack phrases in last 4 | disband |
+| 2× HIGH-confidence `[DONE]`/`[COMPLETE]`/`[FINISHED]`/`[EXEC_DONE]`/`[VERIFY_DONE]` from different agents within 60 s | `COMPLETION_SIGNAL_WINDOW_MS` | disband immediately |
+| 1× HIGH-confidence + idle > 120 s | `SINGLE_SIGNAL_IDLE_THRESHOLD_MS` | disband |
+| 1× LOW-confidence (`done`, `complete`, `klaar`, `afgerond`, …) + idle > 300 s | `LOW_CONFIDENCE_IDLE_THRESHOLD_MS` | disband |
 
-`isPoliteAckPhrase()` catches 13 patterns (see `watchdog_ack.test.ts` for the full enum).
+The idle-checker also uses `messages.jsonl` mtime as a bridge-zombie guard: if the on-disk file has grown past the registry's last-seen timestamp by more than 10 s, the file mtime is treated as the real last-activity signal (prevents false disband when the bridge has died while agents are still writing).
+
+`isPoliteAckPhrase()` catches the standing-by / ready-to-help family of acknowledgement messages across English, Slovenian, and Dutch.
 
 ---
 

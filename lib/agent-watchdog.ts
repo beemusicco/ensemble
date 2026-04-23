@@ -138,14 +138,15 @@ export function isPoliteAckPhrase(content: string): boolean {
     /\bno\s+(new|further)\s+(update|action|finding)/,
     /\b(still|just)\s+(monitoring|observing|watching)/,
     /^(ok|okay|got it|understood|noted|roger|will do|sure|alright)[.!]?$/i,
-    // Slovenian
-    /\bzaključeno\.?$/,
+    // Slovenian — only whole-message / sentence-final forms so productive
+    // in-line acknowledgements ("razumem, grem dalje...") are not counted.
+    /^zaključeno[.!]?$/,
     /\bpripravljen(a)?\s+(sem|da)\s+(pomag|nadaljuj|začn)/,
     /\bčakam\s+(na\s+)?(navodila|nasledn|vaš|dodatn)/,
-    /\bna\s+voljo\s+(sem|za)/,
+    /^na\s+voljo\s+(sem|za)/,
     /\bsvoje\s+naloge\s+(sem\s+)?zaključil/,
-    /\bv\s+mirovanju\b/,
-    /\brazumem\.?$/,
+    /^v\s+mirovanju[.!]?$/,
+    /^razumem[.!]?$/,
     /\bbrez\s+(novih|nadaljnjih)\s+(opazk|ugotov|spremem)/,
   ]
   return ACK_PATTERNS.some(p => p.test(norm))
@@ -246,10 +247,6 @@ export class AgentWatchdog {
     }
 
     for (const team of activeTeams) {
-      // A3: skip teams still in pre-executing phases. Nudging during ready_wait
-      // or planning produces races with initial prompt delivery.
-      const phase = team.phase
-      if (phase && phase !== 'executing' && phase !== 'reviewing') continue
       await this.checkCommunicationLoop(team)
       await this.pollTeam(team)
     }
@@ -455,6 +452,30 @@ export class AgentWatchdog {
         ...currentState,
         stalledAt: new Date(nowMs).toISOString(),
       })
+    }
+
+    // If EVERY active agent is now stalled, the team is effectively dead — the
+    // idle-checker won't notice because it looks at last message from ANY
+    // non-ensemble sender, which could be the stall notice itself. The docs
+    // promise "no message in stall window → disband"; this delivers it.
+    if (activeAgents.length > 0 && this.deps.disbandTeam) {
+      const allStalled = activeAgents.every(agent => {
+        const s = this.state.get(`${team.id}:${agent.name}`)
+        return Boolean(s?.stalledAt)
+      })
+      if (allStalled) {
+        console.warn(`[Watchdog] All ${activeAgents.length} agents stalled in team ${team.id} — force-disbanding`)
+        this.deps.appendMessage(team.id, {
+          id: uuidv4(),
+          teamId: team.id,
+          from: 'ensemble',
+          to: 'team',
+          content: `🛑 Force-disband: all agents stalled past nudge window (no progress after ${Math.round(this.stallAfterMs / 1000)}s post-nudge)`,
+          type: 'chat',
+          timestamp: new Date(this.now()).toISOString(),
+        })
+        await this.deps.disbandTeam(team.id, 'all agents stalled')
+      }
     }
   }
 
