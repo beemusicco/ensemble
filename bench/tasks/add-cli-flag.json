@@ -1,0 +1,13 @@
+{
+  "id": "add-cli-flag",
+  "description": "Modify the Python script at BENCH_WORKSPACE/greet.py to accept an optional --shout flag. When --shout is passed, the greeting output is uppercased. Without the flag, behaviour is unchanged. Write a pytest-style test in BENCH_WORKSPACE/test_greet.py covering both cases.",
+  "workspaceSeed": {
+    "greet.py": "import sys\n\ndef greet(name, shout=False):\n    msg = f'Hello, {name}!'\n    return msg\n\nif __name__ == '__main__':\n    name = sys.argv[1] if len(sys.argv) > 1 else 'World'\n    print(greet(name))\n"
+  },
+  "verify": [
+    { "cmd": "python3 BENCH_WORKSPACE/greet.py Alice", "expectStdoutContains": "Hello, Alice!" },
+    { "cmd": "python3 BENCH_WORKSPACE/greet.py Alice --shout", "expectStdoutContains": "HELLO, ALICE!" },
+    { "cmd": "python3 -m pytest BENCH_WORKSPACE/test_greet.py -q", "expectExitCode": 0 }
+  ],
+  "timeoutSeconds": 480
+}

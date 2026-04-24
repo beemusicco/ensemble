@@ -1,0 +1,13 @@
+{
+  "id": "add-endpoint",
+  "description": "The file BENCH_WORKSPACE/server.js is a tiny HTTP server that exposes GET /hello. Add a second endpoint GET /bye that returns JSON {\"message\": \"goodbye\"}. Keep /hello behaviour unchanged. Then verify with curl against port 8899.",
+  "workspaceSeed": {
+    "server.js": "const http = require('http')\n\nconst server = http.createServer((req, res) => {\n  if (req.url === '/hello') {\n    res.writeHead(200, {'Content-Type': 'application/json'})\n    res.end(JSON.stringify({message: 'hello'}))\n    return\n  }\n  res.writeHead(404)\n  res.end('not found')\n})\n\nserver.listen(8899, '127.0.0.1', () => console.log('up on 8899'))\n"
+  },
+  "verify": [
+    { "startBackground": "node BENCH_WORKSPACE/server.js", "waitForPort": 8899, "killAfter": true },
+    { "cmd": "curl -sf http://127.0.0.1:8899/hello", "expectStdoutContains": "hello" },
+    { "cmd": "curl -sf http://127.0.0.1:8899/bye", "expectStdoutContains": "goodbye" }
+  ],
+  "timeoutSeconds": 420
+}

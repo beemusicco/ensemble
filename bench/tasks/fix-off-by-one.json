@@ -1,0 +1,12 @@
+{
+  "id": "fix-off-by-one",
+  "description": "The script BENCH_WORKSPACE/sum_range.py has a bug: sum_range(1, 5) should return 15 (1+2+3+4+5) but currently returns 10. Find and fix the off-by-one, then verify by running BENCH_WORKSPACE/test_sum_range.py.",
+  "workspaceSeed": {
+    "sum_range.py": "def sum_range(start, end):\n    total = 0\n    for i in range(start, end):\n        total += i\n    return total\n\nif __name__ == '__main__':\n    print(sum_range(1, 5))\n",
+    "test_sum_range.py": "from sum_range import sum_range\n\ndef test_basic():\n    assert sum_range(1, 5) == 15\n\ndef test_single():\n    assert sum_range(3, 3) == 3\n\ndef test_neg():\n    assert sum_range(-2, 2) == 0\n"
+  },
+  "verify": [
+    { "cmd": "cd BENCH_WORKSPACE && python3 -m pytest test_sum_range.py -q", "expectExitCode": 0 }
+  ],
+  "timeoutSeconds": 360
+}
