@@ -1,6 +1,6 @@
-import fs from 'fs'
 import path from 'path'
 import { getEnsembleDataDir } from './ensemble-paths'
+import { RotatingFileWriter } from './log-rotation'
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -18,24 +18,7 @@ function logFilePath(): string {
 let minLevel: LogLevel = (process.env.ENSEMBLE_LOG_LEVEL as LogLevel) || 'info'
 if (!(minLevel in LEVEL_PRIORITY)) minLevel = 'info'
 
-let fileStream: fs.WriteStream | null = null
-let cachedPath: string | null = null
-function getFileStream(): fs.WriteStream | null {
-  const p = logFilePath()
-  if (fileStream && cachedPath === p) return fileStream
-  try {
-    fs.mkdirSync(getLogsDir(), { recursive: true })
-    const s = fs.createWriteStream(p, { flags: 'a' })
-    s.on('error', () => { /* swallow async write errors */ })
-    fileStream = s
-    cachedPath = p
-    return s
-  } catch {
-    fileStream = null
-    cachedPath = null
-    return null
-  }
-}
+const logWriter = new RotatingFileWriter(logFilePath, getLogsDir)
 
 export interface LogFields {
   [key: string]: unknown
@@ -50,10 +33,7 @@ function emit(level: LogLevel, msg: string, fields?: LogFields) {
     ...fields,
   }
   const line = JSON.stringify(record)
-  const s = getFileStream()
-  if (s) {
-    try { s.write(line + '\n') } catch { /* shutdown */ }
-  }
+  logWriter.write(line)
   const target = level === 'error' || level === 'warn' ? process.stderr : process.stdout
   target.write(line + '\n')
 }
@@ -73,4 +53,8 @@ export const logger = {
 
 export function getLogFilePath(): string {
   return logFilePath()
+}
+
+export function checkLogRotation(): void {
+  logWriter.checkRotation()
 }

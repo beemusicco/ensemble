@@ -12,10 +12,13 @@ import {
 import { getTeam } from './lib/ensemble-registry'
 import { verifyBearer, getAuthToken, getAuthTokenPath } from './lib/auth'
 import { logger } from './lib/logger'
+import { buildHealthReport } from './lib/health'
 import {
   writeMemory, queryMemories, deleteMemory, memoryStats,
   type MemoryScope,
 } from './lib/memory-store'
+
+const SERVER_VERSION = '1.0.0'
 
 const PORT = parseInt(process.env.ENSEMBLE_PORT || process.env.ORCHESTRA_PORT || '23000', 10)
 const HOST = process.env.ENSEMBLE_HOST || '127.0.0.1'
@@ -135,9 +138,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    // Health check — unauthenticated, liveness probe
+    // Health check — unauthenticated, component-aware probe
     if (path === '/api/v1/health') {
-      return json(res, { status: 'healthy', version: '1.0.0' }, 200, origin)
+      const report = await buildHealthReport(SERVER_VERSION)
+      return json(res, report, 200, origin)
     }
 
     // Auth gate for all other endpoints

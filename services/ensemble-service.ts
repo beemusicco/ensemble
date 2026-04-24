@@ -26,6 +26,7 @@ import {
   collabBridgeResult, ensureCollabDirs, collabMessagesFile,
 } from '../lib/collab-paths'
 import { queryMemories } from '../lib/memory-store'
+import { appendCostEntry } from '../lib/cost-ledger'
 import { startSpan, endSpan } from '../lib/tracer'
 import { analyzeThinking, pruneAlreadyWarned, getCurrentPhase } from '../lib/thinking-phases'
 import fs from 'fs'
@@ -1072,6 +1073,20 @@ export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team:
     status: 'disbanded',
     completedAt: new Date().toISOString(),
   })
+
+  // Cost ledger append — runs inside disbandTeam so it's captured once per
+  // real disband. Reuses tokenUsageMap scraped by writeDisbandSummary so we
+  // don't re-scan tmux panes. Failures never propagate (appendCostEntry
+  // swallows disk errors).
+  if (updated?.completedAt) {
+    appendCostEntry({
+      teamId,
+      teamName: team.name,
+      description: (team.description ?? '').slice(0, 200),
+      completedAt: updated.completedAt,
+      perAgent: tokenUsageMap,
+    })
+  }
 
   // Soft cleanup: remove ephemeral files, keep messages/summary/log, write .finished marker
   try {

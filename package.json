@@ -27,6 +27,7 @@
     "services/",
     "types/",
     "scripts/",
+    "launchd/",
     "server.ts",
     "agents.json",
     "collab-templates.json",

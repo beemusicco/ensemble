@@ -1,7 +1,7 @@
-import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import { getEnsembleDataDir } from './ensemble-paths'
+import { RotatingFileWriter } from './log-rotation'
 
 export interface SpanFields {
   [key: string]: unknown
@@ -29,24 +29,7 @@ function tracesFilePath(): string {
   return path.join(tracesDir(), `traces-${today}.jsonl`)
 }
 
-let stream: fs.WriteStream | null = null
-let cachedPath: string | null = null
-function getStream(): fs.WriteStream | null {
-  const p = tracesFilePath()
-  if (stream && cachedPath === p) return stream
-  try {
-    fs.mkdirSync(tracesDir(), { recursive: true })
-    const s = fs.createWriteStream(p, { flags: 'a' })
-    s.on('error', () => { /* swallow async write errors */ })
-    stream = s
-    cachedPath = p
-    return s
-  } catch {
-    stream = null
-    cachedPath = null
-    return null
-  }
-}
+const traceWriter = new RotatingFileWriter(tracesFilePath, tracesDir)
 
 export function startSpan(name: string, attrs: SpanFields = {}, parentId?: string): Span {
   return {
@@ -68,10 +51,7 @@ export function endSpan(span: Span, extraAttrs: SpanFields = {}, error?: Error |
     span.status = 'error'
     span.error = typeof error === 'string' ? error : error.message
   }
-  const s = getStream()
-  if (s) {
-    try { s.write(JSON.stringify(span) + '\n') } catch { /* shutdown */ }
-  }
+  traceWriter.write(JSON.stringify(span))
   return span
 }
 
@@ -94,4 +74,8 @@ export async function trace<T>(
 
 export function getTracesFilePath(): string {
   return tracesFilePath()
+}
+
+export function checkTraceRotation(): void {
+  traceWriter.checkRotation()
 }
