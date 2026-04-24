@@ -90,6 +90,21 @@ const PROGRESS_PATTERNS = [
   /\b\d+\s+file[s]?\s+chang(?:ed|es)\b/i,                     // git stat
   /\[PROGRESS\]/i,
   /\[FINDING\]/i,
+  // Real-world progress phrases agents use while coordinating — previously
+  // missed because they don't use a past-tense verb. Triangular-chatter
+  // detection mis-fired on "patch is in / tests next / ready for gate"
+  // messages during the 2026-04-24 company-ops collabs.
+  /\bpatch\s+(?:is\s+in|in|applied|landed|ready)\b/i,
+  /\bready\s+for\s+(?:gate|review|test|verify|local\s+gate)\b/i,
+  /\bready\s+to\s+(?:gate|verify|test|review|ship)\b/i,
+  /\b(?:still\s+)?cod(?:ing|ed)\b/i,
+  /\bin\s+progress\b/i,
+  /\bworking\s+on\b/i,
+  /\bon\s+it\b/i,
+  /\bwip\b/i,
+  /\bitem\s+\d+\s+(?:done|complete|ready|in|patched|landed)\b/i,
+  /\bgate\s+(?:pass|passes|passed|passing|next|now)\b/i,
+  /\b(?:starting|started)\s+(?:item|phase|work)\b/i,
 ]
 
 // Fix 6: parse class tag from message content [PLAN]/[FINDING]/etc.
@@ -299,7 +314,14 @@ export class AgentWatchdog {
 
     // D2: triangular chatter detection — if last N agent msgs cycle through 3+
     // distinct senders with no progress, force-disband. Catches A→B→C→A loops.
-    const TRIANGULAR_WINDOW = 9 // 3 agents × 3 rounds
+    // Bumped from 9 to 12 after the 2026-04-24 company-ops collabs showed
+    // real work being killed on 3-round coordination — 12 gives 4 rounds per
+    // agent before the rule fires, matching the cadence of legitimate
+    // handoffs. Env-tunable via ENSEMBLE_TRIANGULAR_WINDOW.
+    const TRIANGULAR_WINDOW = Math.max(
+      6,
+      parseInt(process.env['ENSEMBLE_TRIANGULAR_WINDOW'] ?? '', 10) || 12,
+    )
     if (agentMessages.length >= TRIANGULAR_WINDOW) {
       const tail = agentMessages.slice(-TRIANGULAR_WINDOW)
       const uniqueSenders = new Set(tail.map(m => m.from))
