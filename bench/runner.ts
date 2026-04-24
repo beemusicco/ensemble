@@ -187,26 +187,39 @@ async function runCollab(task: Task, ws: string): Promise<Trial> {
   const teamId = fs.readFileSync(teamIdFile, 'utf8').trim()
   const finishedMarker = path.join('/tmp/ensemble', teamId, '.finished')
   const deadline = Date.now() + (task.timeoutSeconds ?? 600) * 1000
+
+  // Poll verify every 15s; early-exit the moment tests pass. Don't wait for
+  // agents to emit [DONE] — agents forget, and the task is what matters.
+  // Give agents 30s before first probe so they have a chance to make edits.
+  await new Promise(r => setTimeout(r, 30_000))
+  let lastResult: { passed: boolean; failedStep?: string } = { passed: false, failedStep: 'no probe yet' }
   while (Date.now() < deadline) {
-    if (fs.existsSync(finishedMarker)) break
-    await new Promise(r => setTimeout(r, 2000))
+    if (fs.existsSync(finishedMarker)) {
+      lastResult = await runVerify(task, ws)
+      break
+    }
+    lastResult = await runVerify(task, ws)
+    if (lastResult.passed) break
+    await new Promise(r => setTimeout(r, 15_000))
   }
 
   const duration = (Date.now() - t0) / 1000
-  if (!fs.existsSync(finishedMarker)) {
-    // Force disband
-    spawnSync('bash', [path.join(REPO, 'scripts/collab-terminate.sh'), teamId, '--disband'], { encoding: 'utf8' })
+  // Always terminate the team so the server cleans up and the next trial
+  // doesn't auto-resume an in-flight team on the same cwd.
+  spawnSync('bash', [path.join(REPO, 'scripts/collab-terminate.sh'), teamId, '--disband'], { encoding: 'utf8' })
+
+  if (!lastResult.passed) {
     return {
       taskId: task.id, mode: 'collab', startedAt, durationSeconds: duration,
-      passed: false, failedStep: `collab timed out after ${duration.toFixed(0)}s`,
+      passed: false,
+      failedStep: lastResult.failedStep ?? `collab did not produce a passing state in ${duration.toFixed(0)}s`,
       workspace: ws,
     }
   }
 
-  const verify = await runVerify(task, ws)
   return {
     taskId: task.id, mode: 'collab', startedAt, durationSeconds: duration,
-    passed: verify.passed, failedStep: verify.failedStep, workspace: ws,
+    passed: true, workspace: ws,
   }
 }
 
