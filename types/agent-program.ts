@@ -8,7 +8,7 @@ export interface AgentProgram {
   name: string
   /** CLI command to launch the agent (e.g. "codex", "claude", "aider") */
   command: string
-  /** Default flags appended to the command (e.g. ["-m", "gpt-5.4"]) */
+  /** Default flags appended to the command (e.g. ["-m", "gpt-5.5"]) */
   flags: string[]
   /** String that appears in tmux pane when agent is ready for input */
   readyMarker: string
