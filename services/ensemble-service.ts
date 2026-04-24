@@ -27,6 +27,7 @@ import {
 } from '../lib/collab-paths'
 import { queryMemories } from '../lib/memory-store'
 import { startSpan, endSpan } from '../lib/tracer'
+import { analyzeThinking, pruneAlreadyWarned, getCurrentPhase } from '../lib/thinking-phases'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -126,6 +127,11 @@ class EnsembleService {
     const teams = loadTeams().filter(team => team.status === 'active')
 
     for (const team of teams) {
+      // Thinking-mode supervisor runs on every idle tick, independent of
+      // disband logic. Each emitted warning is a team-visible message so
+      // agents see the same feedback a human reviewer would give.
+      this.runThinkingSupervisor(team.id)
+
       if (this.disbandingTeams.has(team.id)) continue
       if (!this.shouldAutoDisband(team)) continue
 
@@ -216,6 +222,37 @@ class EnsembleService {
       }
     }
     return false
+  }
+
+  /**
+   * Programmatic thinking-mode supervisor. Runs deterministic structural
+   * checks over the team's message log and emits supervisor_warning
+   * messages into the team feed for anything agents should correct.
+   *
+   * No LLM call, no token cost. Fires ~once per IDLE_CHECK_INTERVAL tick.
+   * Warnings are deduplicated across ticks so we don't spam.
+   */
+  private runThinkingSupervisor(teamId: string): void {
+    try {
+      const messages = getMessages(teamId)
+      if (getCurrentPhase(messages) === null) return // not thinking mode
+
+      const findings = analyzeThinking(messages)
+      const fresh = pruneAlreadyWarned(findings, messages)
+      for (const f of fresh) {
+        const targetId = String(f.evidence?.hypothesisId ?? f.evidence?.messageId ?? '')
+        appendMessage(teamId, {
+          id: uuidv4(),
+          teamId,
+          from: 'ensemble',
+          to: 'team',
+          content: `🧠 supervisor: ${f.message}`,
+          type: 'supervisor_warning',
+          timestamp: new Date().toISOString(),
+          meta: { code: f.code, target: targetId, severity: f.severity },
+        })
+      }
+    } catch { /* non-fatal — supervisor failures must never break the service */ }
   }
 
   private stop(): void {
@@ -376,7 +413,9 @@ export function buildPromptPreview(params: {
   const teamRememberCmd = `${scriptsDir}/team-remember.sh`
   const teamRecallCmd = `${scriptsDir}/team-recall.sh`
   const teamHistoryCmd = `${scriptsDir}/team-history.sh`
+  const teamThinkCmd = `${scriptsDir}/team-think.sh`
   const safeDescription = sanitizeTaskDescription(params.description)
+  const isThinkingMode = params.templateName === 'thinking'
 
   let memoriesBlock = ''
   try {
@@ -449,6 +488,29 @@ export function buildPromptPreview(params: {
     `  Read a specific past team's full log: ${teamHistoryCmd} feed <team-id>`,
     `  Browse recent teams: ${teamHistoryCmd} recent [N]`,
     `  Use this BEFORE starting a similar task — prior teams may have solved it, hit dead ends worth avoiding, or surfaced relevant context. Always cite the team-id when building on prior work.`,
+    isThinkingMode ? [
+      `THINKING MODE — this team operates under a deliberate reasoning protocol.`,
+      `You MUST follow a six-phase flow. Skipping phases or bypassing the typed-message commands triggers supervisor warnings.`,
+      ``,
+      `  PHASE 1 FRAME        — understand the problem. MANDATORY: first run ${teamHistoryCmd} search "<key-terms>" AND ${teamRecallCmd} --tags=<topic> to see what prior teams learned. Then enumerate 2-5 hypotheses via: ${teamThinkCmd} hypothesize ${params.teamId} ${params.agentName} <H-id> <low|medium|high> "<statement>". Each hypothesis needs a unique id (H1, H2, ...). When your hypotheses are logged, emit: ${teamThinkCmd} phase ${params.teamId} ${params.agentName} evidence`,
+      ``,
+      `  PHASE 2 EVIDENCE     — gather data for EACH hypothesis. Run commands, read files, query memory. For every piece of evidence: ${teamThinkCmd} evidence ${params.teamId} ${params.agentName} <H-id> "<what-you-observed>" "<source-command-or-file>". Evidence for a hypothesis that was never registered will be flagged by the supervisor. When each hypothesis has at least one piece of evidence (or is marked unverifiable), emit: ${teamThinkCmd} phase ${params.teamId} ${params.agentName} synthesis`,
+      ``,
+      `  PHASE 3 SYNTHESIS    — compare the evidence. BEFORE any decision, at least one challenge MUST be logged: ${teamThinkCmd} challenge ${params.teamId} ${params.agentName} <H-id> "<why-it-might-still-be-wrong>". A decision without a preceding challenge is flagged. When converged, pick the winning hypothesis: ${teamThinkCmd} decide ${params.teamId} ${params.agentName} <H-id> "<reasoning-referencing-evidence>". Then: ${teamThinkCmd} phase ${params.teamId} ${params.agentName} action`,
+      ``,
+      `  PHASE 4 ACTION       — implement based on the decision. Keep changes minimal. Cite the hypothesis id in commit messages / diffs so the reasoning trail stays connected. When the implementation is ready to test: ${teamThinkCmd} phase ${params.teamId} ${params.agentName} verify`,
+      ``,
+      `  PHASE 5 VERIFY       — run the tests. If they pass, the hypothesis is confirmed. If they fail, log a new piece of evidence (type=evidence) linking the failure to a hypothesis, and return to PHASE 2 or 3 as appropriate — do NOT paper over failures. When verification succeeds: ${teamThinkCmd} phase ${params.teamId} ${params.agentName} reflect`,
+      ``,
+      `  PHASE 6 REFLECT      — save durable learnings: ${teamThinkCmd} reflect ${params.teamId} ${params.agentName} "<lesson-for-future-teams>" --tags=<topic>,<component>. Reflections auto-persist to global memory so future teams see them. Write at least one reflection, then ${teamDoneCmd} "<one-line-summary>".`,
+      ``,
+      `HARD RULES:`,
+      `- NO hypothesis without a preceding ${teamHistoryCmd} search + ${teamRecallCmd}. The supervisor flags unverified starts.`,
+      `- NO decision without at least one challenge in the same synthesis phase.`,
+      `- NO decision without at least one piece of evidence for the picked hypothesis.`,
+      `- NO phase regression (going backwards) without explicitly explaining why in a chat message.`,
+      `- Supervisor warnings show up as 🧠 messages from 'ensemble'. Read them. Fix what they flag.`,
+    ].join('\n') : '',
     `Start NOW: greet your teammate with team-say, then begin.`,
   ].filter(Boolean).join(' ')
 }
@@ -782,20 +844,43 @@ export function getTeamFeed(teamId: string, since?: string): ServiceResult<{ mes
 export async function sendTeamMessage(
   teamId: string, to: string, content: string, from?: string,
   existingId?: string, existingTimestamp?: string,
+  type?: string, meta?: Record<string, unknown>,
 ): Promise<ServiceResult<{ message: EnsembleMessage }>> {
-  const span = startSpan('send_message', { teamId, from: from || 'user', to, contentLen: content.length })
+  const span = startSpan('send_message', { teamId, from: from || 'user', to, contentLen: content.length, type: type || 'chat' })
   const team = getTeam(teamId)
   if (!team) {
     endSpan(span, {}, 'team_not_found')
     return { error: 'Team not found', status: 404 }
   }
 
+  const validTypes = new Set([
+    'chat', 'decision', 'question', 'result',
+    'phase', 'hypothesis', 'evidence', 'decision_pick', 'challenge', 'reflect', 'supervisor_warning',
+  ])
+  const msgType = (type && validTypes.has(type)) ? type : 'chat'
+
   const message: EnsembleMessage = {
     id: existingId || uuidv4(), teamId, from: from || 'user', to, content,
-    type: 'chat', timestamp: existingTimestamp || new Date().toISOString(),
+    type: msgType as EnsembleMessage['type'],
+    timestamp: existingTimestamp || new Date().toISOString(),
+    ...(meta ? { meta } : {}),
   }
   appendMessage(teamId, message)
-  endSpan(span, { messageId: message.id })
+
+  // Auto-persist reflections to global memory so future teams can recall them.
+  if (msgType === 'reflect') {
+    try {
+      const { writeMemory } = await import('../lib/memory-store')
+      const tags = Array.isArray(meta?.tags) ? (meta!.tags as string[]) : []
+      writeMemory({
+        scope: 'global', key: `reflection:${message.id.slice(0, 8)}`,
+        value: content, tags: [...tags, 'reflection', teamId.slice(0, 8)],
+        agent: from, teamId,
+      })
+    } catch { /* non-fatal */ }
+  }
+
+  endSpan(span, { messageId: message.id, type: msgType })
 
   // Determine which agents should receive this message in their tmux pane
   const sender = from || 'user'

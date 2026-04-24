@@ -31,15 +31,32 @@ export interface EnsembleTeamResult {
   duration: number
 }
 
+export type ThinkingPhase = 'frame' | 'evidence' | 'synthesis' | 'action' | 'verify' | 'reflect'
+
+export type EnsembleMessageType =
+  | 'chat'
+  | 'decision'
+  | 'question'
+  | 'result'
+  // Thinking-mode structured messages:
+  | 'phase'         // phase transition marker, content = ThinkingPhase name
+  | 'hypothesis'    // unverified claim; meta holds {id, confidence}
+  | 'evidence'      // data supporting a hypothesis; meta holds {hypothesisId, source}
+  | 'decision_pick' // formal pick; meta holds {hypothesisId, dissents}
+  | 'challenge'     // why a claim might be wrong; meta holds {targetId}
+  | 'reflect'       // learning to persist; meta holds {tags}
+  | 'supervisor_warning' // programmatic supervisor flag
+
 export interface EnsembleMessage {
   id: string
   teamId: string
   from: string
   to: string
   content: string
-  type: 'chat' | 'decision' | 'question' | 'result'
+  type: EnsembleMessageType
   timestamp: string
   options?: string[]
+  meta?: Record<string, unknown>
 }
 
 export interface CreateTeamRequest {

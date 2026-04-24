@@ -191,7 +191,16 @@ const server = http.createServer(async (req, res) => {
             }
           }
         }
-        const result = await sendTeamMessage(teamId, (body.to as string) || 'team', body.content as string, sender, body.id as string, body.timestamp as string)
+        const result = await sendTeamMessage(
+          teamId,
+          (body.to as string) || 'team',
+          body.content as string,
+          sender,
+          body.id as string,
+          body.timestamp as string,
+          body.type as string | undefined,
+          body.meta as Record<string, unknown> | undefined,
+        )
         if (result.error) return json(res, { error: result.error }, result.status, origin)
         return json(res, result.data, result.status, origin)
       }
@@ -225,6 +234,18 @@ const server = http.createServer(async (req, res) => {
       const result = await signalCompleteTeam(signalMatch[1], from, body.note as string | undefined)
       if (result.error) return json(res, { error: result.error }, result.status, origin)
       return json(res, result.data, result.status, origin)
+    }
+
+    // Thinking-mode: current phase
+    const phaseMatch = path.match(/^\/api\/ensemble\/teams\/([^/]+)\/phase$/)
+    if (phaseMatch && method === 'GET') {
+      const { getCurrentPhase } = await import('./lib/thinking-phases')
+      const teamId = phaseMatch[1]
+      const team = getTeam(teamId)
+      if (!team) return json(res, { error: 'Team not found' }, 404, origin)
+      const { getMessages } = await import('./lib/ensemble-registry')
+      const phase = getCurrentPhase(getMessages(teamId))
+      return json(res, { teamId, phase }, 200, origin)
     }
 
     // Feed: /api/ensemble/teams/:id/feed

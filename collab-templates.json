@@ -172,6 +172,23 @@
           "expert": "w-edwards-deming"
         }
       ]
+    },
+    "thinking": {
+      "name": "Thinking Mode (structured hypothesis → evidence → decision)",
+      "description": "Force the team into a deliberate reasoning protocol: frame the problem with hypotheses, gather evidence for each, challenge before deciding, then act and verify. Supervisor catches unverified claims and circling. Use when correctness matters more than speed.",
+      "suggestedTaskPrefix": "Investigate using structured thinking mode:",
+      "roles": [
+        {
+          "role": "INVESTIGATOR",
+          "focus": "Own the investigation. Frame the problem, enumerate 2-5 hypotheses (team-think hypothesize), gather evidence for each (team-think evidence). Do NOT pick a decision alone — wait for the challenger's critique before team-think decide. Reflect on what you learned before team-done.",
+          "expert": "julia-galef"
+        },
+        {
+          "role": "CHALLENGER",
+          "focus": "Own the critique. Actively challenge every hypothesis the investigator proposes (team-think challenge). Demand evidence. Propose competing hypotheses. Only agree to a decision after the evidence is strong enough that you would bet on it. Your job is to prevent groupthink, not to agree.",
+          "expert": "karl-popper"
+        }
+      ]
     }
   }
 }
