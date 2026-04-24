@@ -383,7 +383,7 @@ switch (cmd) {
   }
   case 'auth': {
     const sub = args[0] || 'show'
-    const { getAuthTokenPath } = await import('../lib/auth')
+    const { getAuthTokenPath, addUser, listUsers, revokeUser } = await import('../lib/auth')
     if (sub === 'path') {
       console.log(getAuthTokenPath())
     } else if (sub === 'show' || sub === 'print') {
@@ -405,12 +405,56 @@ switch (cmd) {
       console.log(`${c.yellow}⚠  Restart the ensemble server so in-flight auth checks use the new token.${c.r}`)
       console.log(`   Then re-share with your team: ${c.bold}ensemble auth share${c.r}`)
       console.log(`   token (save securely): ${newToken}`)
+    } else if (sub === 'add-user') {
+      const name = args[1]
+      if (!name) {
+        console.log(`Usage: ensemble auth add-user <name>`)
+        process.exit(1)
+      }
+      try {
+        const user = addUser(name)
+        console.log(`${c.bGreen}●${c.r} user token minted at ${c.dim}${user.path}${c.r}`)
+        console.log(`${c.bold}${c.bWhite}Team onboarding snippet${c.r} — share securely with ${user.name}:`)
+        console.log('')
+        console.log(`  ${c.green}export ENSEMBLE_URL=${API_BASE}${c.r}`)
+        console.log(`  ${c.green}export ENSEMBLE_AUTH_TOKEN=${user.token}${c.r}`)
+        console.log('')
+        console.log(`${c.yellow}⚠  Share this via 1Password / Bitwarden / Keychain, NOT email or chat.${c.r}`)
+      } catch (err) {
+        console.log(`${c.red}✗${c.r} ${err instanceof Error ? err.message : err}`)
+        process.exit(1)
+      }
+    } else if (sub === 'list-users') {
+      const users = listUsers()
+      if (users.length === 0) {
+        console.log(`No per-user tokens found.`)
+        break
+      }
+      for (const user of users) {
+        console.log(`${user.name}\tlast-used ${user.lastUsedAt}\t${user.path}`)
+      }
+    } else if (sub === 'revoke') {
+      const name = args[1]
+      if (!name) {
+        console.log(`Usage: ensemble auth revoke <name>`)
+        process.exit(1)
+      }
+      try {
+        if (revokeUser(name)) console.log(`${c.bGreen}●${c.r} revoked ${name}`)
+        else console.log(`${c.yellow}○${c.r} no token found for ${name}`)
+      } catch (err) {
+        console.log(`${c.red}✗${c.r} ${err instanceof Error ? err.message : err}`)
+        process.exit(1)
+      }
     } else {
-      console.log(`Usage: ensemble auth [show|path|share|rotate]`)
+      console.log(`Usage: ensemble auth [show|path|share|rotate|add-user|list-users|revoke]`)
       console.log(`  show    print the current token (default)`)
       console.log(`  path    print the file path holding the token`)
       console.log(`  share   print an env-var snippet to paste into a teammate's shell`)
       console.log(`  rotate  mint a new token (invalidates the old one after restart)`)
+      console.log(`  add-user <name>  mint a per-user token`)
+      console.log(`  list-users       list per-user tokens`)
+      console.log(`  revoke <name>    delete a per-user token`)
     }
     break
   }
@@ -473,7 +517,7 @@ switch (cmd) {
     ${c.bWhite}steer${c.r} <id> <message>       Send steering message to team
     ${c.bWhite}status${c.r}                     Server health & overview
     ${c.bWhite}init${c.r}                       Interactive team-member onboarding (writes ~/.ensemble/env)
-    ${c.bWhite}auth${c.r} [show|share|rotate]   Manage the API token (team onboarding)
+    ${c.bWhite}auth${c.r} [show|share|rotate|add-user|list-users|revoke]   Manage API tokens
     ${c.bWhite}costs${c.r} [--since=7d|30d|…]   Token usage aggregated per agent
 
   ${c.bold}Monitor keybindings:${c.r}

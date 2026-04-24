@@ -144,6 +144,24 @@ const server = http.createServer(async (req, res) => {
       return json(res, report, 200, origin)
     }
 
+    // Dashboard — browser-friendly HTML shell. Accepts token via either
+    // Authorization header or ?token=XXX query param (needed because
+    // browser <a href> navigation can't set a Bearer header).
+    if (path === '/dashboard' && method === 'GET') {
+      const queryToken = url.searchParams.get('token') || ''
+      const headerToken = req.headers['authorization'] || ''
+      const authOk = verifyBearer(headerToken) ||
+        (queryToken ? verifyBearer(`Bearer ${queryToken}`) : false)
+      if (!authOk) {
+        res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' })
+        res.end('<h1>401 Unauthorized</h1><p>append <code>?token=YOUR_TOKEN</code> to the URL</p>')
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+      res.end(renderDashboardHtml(queryToken || (headerToken.match(/Bearer\s+(.+)/i)?.[1] ?? '')))
+      return
+    }
+
     // Auth gate for all other endpoints
     if (!verifyBearer(req.headers['authorization'])) {
       logger.warn('auth_failed', { ip: getClientIp(req), path, method })
@@ -348,6 +366,108 @@ server.on('error', (err: NodeJS.ErrnoException) => {
   logger.error('server_start_failed', { err: err.message, code: err.code })
   process.exit(1)
 })
+
+function renderDashboardHtml(token: string): string {
+  const safeToken = token.replace(/[^a-f0-9]/gi, '')
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<title>ensemble — dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<style>
+*{box-sizing:border-box}
+body{font:14px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;margin:0;padding:24px;background:#0d1117;color:#c9d1d9}
+h1{font-size:18px;margin:0 0 16px;color:#f0f6fc}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;margin:24px 0 8px;color:#8b949e}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px}
+.pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.ok{background:#238636;color:#fff}.warn{background:#d29922;color:#000}.fail{background:#da3633;color:#fff}.idle{background:#30363d;color:#8b949e}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{padding:6px 8px;text-align:left;border-bottom:1px solid #21262d}
+th{color:#8b949e;font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+tr:last-child td{border-bottom:none}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.dim{color:#6e7681}
+#refresh{font-size:11px;color:#6e7681;float:right}
+.k{color:#8b949e}.v{color:#c9d1d9;font-weight:500}
+.row{display:flex;justify-content:space-between;padding:4px 0}
+</style></head><body>
+<h1>◈ ensemble <span id="refresh">refreshing…</span></h1>
+
+<div class="grid">
+  <div class="card"><h2>Health</h2><div id="health">loading…</div></div>
+  <div class="card"><h2>Memory</h2><div id="memory">loading…</div></div>
+</div>
+
+<h2>Recent teams</h2>
+<div class="card"><table id="teams"><thead><tr><th>status</th><th>name</th><th>agents</th><th>desc</th><th>when</th></tr></thead><tbody><tr><td colspan="5" class="dim">loading…</td></tr></tbody></table></div>
+
+<script>
+const TOKEN = ${JSON.stringify(safeToken)};
+async function api(p) {
+  const r = await fetch(p, { headers: { Authorization: 'Bearer ' + TOKEN } });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+function pill(text, kind) { return '<span class="pill ' + kind + '">' + text + '</span>'; }
+function renderHealth(h) {
+  const overall = h.status === 'healthy' ? pill('healthy','ok')
+    : h.status === 'degraded' ? pill('degraded','warn')
+    : pill(h.status || 'unknown','fail');
+  const rows = Object.entries(h.components || {}).map(([k, v]) => {
+    const val = typeof v === 'object' ? (v.ok ? 'ok' : 'fail') : String(v);
+    const kind = (val === 'ok' || typeof v === 'number') ? 'v' : 'k';
+    return '<div class="row"><span class="k">' + k + '</span><span class="' + kind + '">' + val + '</span></div>';
+  }).join('');
+  return '<div class="row"><span class="k">overall</span>' + overall + '</div>' + rows;
+}
+function renderMemory(s) {
+  const total = s.total || 0;
+  const by = s.byScope || {};
+  const rows = Object.entries(by).map(([k, v]) =>
+    '<div class="row"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>'
+  ).join('');
+  return '<div class="row"><span class="k">total</span><span class="v">' + total + '</span></div>' + rows;
+}
+function statusPill(s) {
+  if (s === 'active') return pill('active','ok');
+  if (s === 'disbanded') return pill('disbanded','idle');
+  if (s === 'failed') return pill('failed','fail');
+  return pill(s,'idle');
+}
+function renderTeams(data) {
+  const teams = (data.teams || []).slice(0, 10);
+  if (!teams.length) return '<tr><td colspan="5" class="dim">no teams</td></tr>';
+  return teams.map(t => {
+    const agents = (t.agents || []).map(a => a.name).join(' + ');
+    const when = t.completedAt || t.createdAt || '';
+    const whenShort = when ? when.slice(0, 19).replace('T', ' ') : '';
+    const desc = (t.description || '').slice(0, 80);
+    return '<tr><td>' + statusPill(t.status) + '</td><td class="mono">' + (t.name || '') + '</td><td class="mono">' + agents + '</td><td class="dim">' + desc + '</td><td class="mono dim">' + whenShort + '</td></tr>';
+  }).join('');
+}
+async function refresh() {
+  document.getElementById('refresh').textContent = 'refreshing…';
+  try {
+    const [h, m, t] = await Promise.all([
+      api('/api/v1/health'),
+      api('/api/ensemble/memory/stats'),
+      api('/api/ensemble/history/recent?limit=10'),
+    ]);
+    document.getElementById('health').innerHTML = renderHealth(h);
+    document.getElementById('memory').innerHTML = renderMemory(m);
+    document.getElementById('teams').querySelector('tbody').innerHTML = renderTeams(t);
+    document.getElementById('refresh').textContent = 'updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('refresh').textContent = 'error: ' + e.message;
+  }
+}
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body></html>`
+}
 
 server.listen(PORT, HOST, () => {
   // Force token initialization so operators see the path on first boot.
