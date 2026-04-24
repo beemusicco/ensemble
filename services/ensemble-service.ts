@@ -375,6 +375,7 @@ export function buildPromptPreview(params: {
   const teamDoneCmd = `${scriptsDir}/team-done.sh ${params.teamId} ${params.agentName}`
   const teamRememberCmd = `${scriptsDir}/team-remember.sh`
   const teamRecallCmd = `${scriptsDir}/team-recall.sh`
+  const teamHistoryCmd = `${scriptsDir}/team-history.sh`
   const safeDescription = sanitizeTaskDescription(params.description)
 
   let memoriesBlock = ''
@@ -443,6 +444,11 @@ export function buildPromptPreview(params: {
     `  Save a durable finding for future teams: ${teamRememberCmd} global <key> "<value>" [--tags=a,b]`,
     `  Recall prior findings: ${teamRecallCmd} [--scope=global] [--tags=a,b]`,
     `  Use scope=session for this team only, team for this team-id, global for all future teams.`,
+    `HISTORY (previous collab teams' full conversations):`,
+    `  Search past teams by keyword (task desc + messages): ${teamHistoryCmd} search "<keyword>"`,
+    `  Read a specific past team's full log: ${teamHistoryCmd} feed <team-id>`,
+    `  Browse recent teams: ${teamHistoryCmd} recent [N]`,
+    `  Use this BEFORE starting a similar task — prior teams may have solved it, hit dead ends worth avoiding, or surfaced relevant context. Always cite the team-id when building on prior work.`,
     `Start NOW: greet your teammate with team-say, then begin.`,
   ].filter(Boolean).join(' ')
 }
@@ -1045,6 +1051,73 @@ export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team:
 
   endSpan(span, { disbandedAt: updated?.completedAt })
   return { data: { team: updated! }, status: 200 }
+}
+
+export interface HistoryMatch {
+  teamId: string
+  name: string
+  description: string
+  status: string
+  createdAt?: string
+  completedAt?: string
+  agents: string[]
+  matches: Array<{ from: string; timestamp: string; snippet: string }>
+}
+
+/**
+ * Cross-team search across past collab history. Looks at team descriptions
+ * and the persistent message log (registry feed, not /tmp) so reboots don't
+ * lose the trail. Default: latest 20 matching teams, up to 3 message
+ * snippets per team.
+ */
+export function searchHistory(
+  query: string, limit = 20, perTeamSnippets = 3,
+): ServiceResult<{ matches: HistoryMatch[]; total: number }> {
+  const q = query.trim().toLowerCase()
+  if (!q) return { error: 'query required', status: 400 }
+  const allTeams = loadTeams()
+  const sorted = [...allTeams].sort((a, b) => {
+    const ta = new Date(a.completedAt ?? a.createdAt ?? 0).getTime()
+    const tb = new Date(b.completedAt ?? b.createdAt ?? 0).getTime()
+    return tb - ta
+  })
+
+  const matches: HistoryMatch[] = []
+  for (const team of sorted) {
+    if (matches.length >= limit) break
+    const descHit = (team.description ?? '').toLowerCase().includes(q)
+    const messages = getMessages(team.id)
+    const messageHits = messages
+      .filter(m => m.from !== 'ensemble' && (m.content ?? '').toLowerCase().includes(q))
+      .slice(0, perTeamSnippets)
+    if (!descHit && messageHits.length === 0) continue
+
+    matches.push({
+      teamId: team.id,
+      name: team.name,
+      description: team.description ?? '',
+      status: team.status,
+      createdAt: team.createdAt,
+      completedAt: team.completedAt,
+      agents: team.agents.map(a => a.name),
+      matches: messageHits.map(m => ({
+        from: m.from,
+        timestamp: m.timestamp ?? '',
+        snippet: (m.content ?? '').slice(0, 300),
+      })),
+    })
+  }
+  return { data: { matches, total: matches.length }, status: 200 }
+}
+
+export function getRecentTeams(limit = 10): ServiceResult<{ teams: EnsembleTeam[] }> {
+  const all = loadTeams()
+  const sorted = [...all].sort((a, b) => {
+    const ta = new Date(a.completedAt ?? a.createdAt ?? 0).getTime()
+    const tb = new Date(b.completedAt ?? b.createdAt ?? 0).getTime()
+    return tb - ta
+  })
+  return { data: { teams: sorted.slice(0, Math.max(1, Math.min(limit, 100))) }, status: 200 }
 }
 
 /**

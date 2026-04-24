@@ -7,6 +7,7 @@ import http from 'http'
 import {
   createEnsembleTeam, getEnsembleTeam, listEnsembleTeams,
   getTeamFeed, sendTeamMessage, disbandTeam, signalCompleteTeam,
+  searchHistory, getRecentTeams,
 } from './services/ensemble-service'
 import { getTeam } from './lib/ensemble-registry'
 import { verifyBearer, getAuthToken, getAuthTokenPath } from './lib/auth'
@@ -278,6 +279,25 @@ const server = http.createServer(async (req, res) => {
 
     if (path === '/api/ensemble/memory/stats' && method === 'GET') {
       return json(res, memoryStats(), 200, origin)
+    }
+
+    // Cross-team history search: /api/ensemble/history?q=<query>&limit=N
+    if (path === '/api/ensemble/history' && method === 'GET') {
+      const q = url.searchParams.get('q') || ''
+      const limitParam = url.searchParams.get('limit')
+      const limit = limitParam ? parseInt(limitParam, 10) : undefined
+      const result = searchHistory(q, limit)
+      if (result.error) return json(res, { error: result.error }, result.status, origin)
+      return json(res, result.data, result.status, origin)
+    }
+
+    // Recent teams (regardless of content): /api/ensemble/history/recent?limit=N
+    if (path === '/api/ensemble/history/recent' && method === 'GET') {
+      const limitParam = url.searchParams.get('limit')
+      const limit = limitParam ? parseInt(limitParam, 10) : undefined
+      const result = getRecentTeams(limit)
+      if (result.error) return json(res, { error: result.error }, result.status, origin)
+      return json(res, result.data, result.status, origin)
     }
 
     const memoryIdMatch = path.match(/^\/api\/ensemble\/memory\/([^/]+)$/)
