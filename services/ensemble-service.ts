@@ -25,6 +25,8 @@ import {
   collabRuntimeDir, collabFinishedMarker, collabBridgePosted,
   collabBridgeResult, ensureCollabDirs, collabMessagesFile,
 } from '../lib/collab-paths'
+import { queryMemories } from '../lib/memory-store'
+import { startSpan, endSpan } from '../lib/tracer'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -359,7 +361,23 @@ export function buildPromptPreview(params: {
   const scriptsDir = path.join(__dirname, '..', 'scripts')
   const teamSayCmd = `${scriptsDir}/team-say.sh ${params.teamId} ${params.agentName} ${params.teammateNames[0] || 'team'}`
   const teamReadCmd = `${scriptsDir}/team-read.sh ${params.teamId}`
+  const teamRememberCmd = `${scriptsDir}/team-remember.sh`
+  const teamRecallCmd = `${scriptsDir}/team-recall.sh`
   const safeDescription = sanitizeTaskDescription(params.description)
+
+  let memoriesBlock = ''
+  try {
+    const globals = queryMemories({ scope: 'global', limit: 5 })
+    if (globals.length) {
+      const lines = globals.map(m => {
+        const tags = m.tags.length ? ` [${m.tags.join(',')}]` : ''
+        return `  - ${m.key}${tags}: ${m.value.slice(0, 200)}`
+      }).join('\n')
+      memoriesBlock = `TEAM MEMORIES (from past sessions — apply when relevant):\n${lines}\n---\n`
+    }
+  } catch {
+    memoriesBlock = ''
+  }
 
   let roleInstructions: string[]
   let expertSlug: string | undefined
@@ -396,6 +414,7 @@ export function buildPromptPreview(params: {
     : ''
 
   return [
+    memoriesBlock,
     expertBlock,
     `You are ${params.agentName} in team "${params.teamName}" with teammate ${params.teammateNames.join(', ')}.`,
     `Task: ${safeDescription}`,
@@ -408,11 +427,33 @@ export function buildPromptPreview(params: {
     `5. If teammate shared findings, RESPOND to them`,
     `6. Keep alternating: analyze, share, read, respond, analyze`,
     `7. When your part of the task is complete, emit [DONE] in a team-say message (literal brackets required) so the team can close cleanly. Do not linger with polite sign-offs after [DONE].`,
+    `MEMORY (persists across sessions):`,
+    `  Save a durable finding for future teams: ${teamRememberCmd} global <key> "<value>" [--tags=a,b]`,
+    `  Recall prior findings: ${teamRecallCmd} [--scope=global] [--tags=a,b]`,
+    `  Use scope=session for this team only, team for this team-id, global for all future teams.`,
     `Start NOW: greet your teammate with team-say, then begin.`,
   ].filter(Boolean).join(' ')
 }
 
 export async function createEnsembleTeam(
+  request: CreateTeamRequest
+): Promise<ServiceResult<{ team: EnsembleTeam }>> {
+  const span = startSpan('create_team', {
+    agentCount: request.agents?.length ?? 0,
+    staged: !!request.staged,
+    useWorktrees: !!request.useWorktrees,
+  })
+  try {
+    const result = await createEnsembleTeamInner(request)
+    endSpan(span, { teamId: result.data?.team.id })
+    return result
+  } catch (err) {
+    endSpan(span, {}, err instanceof Error ? err : String(err))
+    throw err
+  }
+}
+
+async function createEnsembleTeamInner(
   request: CreateTeamRequest
 ): Promise<ServiceResult<{ team: EnsembleTeam }>> {
   const team = createTeam(request)
@@ -724,14 +765,19 @@ export async function sendTeamMessage(
   teamId: string, to: string, content: string, from?: string,
   existingId?: string, existingTimestamp?: string,
 ): Promise<ServiceResult<{ message: EnsembleMessage }>> {
+  const span = startSpan('send_message', { teamId, from: from || 'user', to, contentLen: content.length })
   const team = getTeam(teamId)
-  if (!team) return { error: 'Team not found', status: 404 }
+  if (!team) {
+    endSpan(span, {}, 'team_not_found')
+    return { error: 'Team not found', status: 404 }
+  }
 
   const message: EnsembleMessage = {
     id: existingId || uuidv4(), teamId, from: from || 'user', to, content,
     type: 'chat', timestamp: existingTimestamp || new Date().toISOString(),
   }
   appendMessage(teamId, message)
+  endSpan(span, { messageId: message.id })
 
   // Determine which agents should receive this message in their tmux pane
   const sender = from || 'user'
@@ -842,8 +888,14 @@ export async function writeDisbandSummary(teamId: string): Promise<Record<string
 }
 
 export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team: EnsembleTeam }>> {
+  const span = startSpan('disband_team', { teamId })
   const team = getTeam(teamId)
-  if (!team) return { error: 'Team not found', status: 404 }
+  if (!team) {
+    endSpan(span, {}, 'team_not_found')
+    return { error: 'Team not found', status: 404 }
+  }
+  span.attributes.agentCount = team.agents.length
+  span.attributes.createdAt = team.createdAt
 
   // Write summary before killing sessions so the Claude Code session can
   // present it. writeDisbandSummary already scraped tmux panes for token
@@ -979,5 +1031,6 @@ export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team:
     }
   } catch { /* non-fatal */ }
 
+  endSpan(span, { disbandedAt: updated?.completedAt })
   return { data: { team: updated! }, status: 200 }
 }

@@ -7,6 +7,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=./collab-paths.sh
 source "$SCRIPT_DIR/collab-paths.sh"
+# shellcheck source=./ensemble-auth.sh
+source "$SCRIPT_DIR/ensemble-auth.sh"
+AUTH_HDR="$(ensemble_auth_header || true)"
 
 CWD="${1:-.}"
 TASK="${2:?Usage: collab-launch.sh <cwd> <task>}"
@@ -99,7 +102,7 @@ fi
 "$SCRIPT_DIR/collab-cleanup.sh" --force > /dev/null 2>&1 &
 
 # ─── 1c. Check for resumable active team on same CWD ───
-ACTIVE_TEAM=$(curl -sf "$API/api/ensemble/teams" 2>/dev/null | python3 -c "
+ACTIVE_TEAM=$(curl -sf -H "$AUTH_HDR" "$API/api/ensemble/teams" 2>/dev/null | python3 -c "
 import json, sys, os
 cwd = os.path.realpath('$CWD')
 teams = json.load(sys.stdin).get('teams', [])
@@ -117,7 +120,7 @@ if [ -n "$ACTIVE_TEAM" ]; then
     exec "$SCRIPT_DIR/collab-resume.sh" "$ACTIVE_TEAM"
   else
     echo -e "  ${C}●${R} Orphaned team $ACTIVE_TEAM (no live sessions) — disbanding and creating fresh..."
-    curl -sf -X DELETE "$API/api/ensemble/teams/$ACTIVE_TEAM" > /dev/null 2>&1 || true
+    curl -sf -H "$AUTH_HDR" -X DELETE "$API/api/ensemble/teams/$ACTIVE_TEAM" > /dev/null 2>&1 || true
   fi
 fi
 
@@ -164,6 +167,7 @@ json.dump(payload, open(os.environ['PFILE'], 'w'))
 [ -n "$TEMPLATE_NAME" ] && echo -e "  ${D}Template: ${TEMPLATE_NAME}${R}"
 RESULT=$(curl -sf -X POST "$API/api/ensemble/teams" \
   -H "Content-Type: application/json" \
+  -H "$AUTH_HDR" \
   -d @"$PAYLOAD_FILE")
 rm -f "$PAYLOAD_FILE"
 
@@ -283,7 +287,7 @@ fi
 # ─── Output ───
 echo ""
 # Build dynamic agent list for display
-AGENT_NAMES=$(curl -sf "$API/api/ensemble/teams/$TEAM_ID" 2>/dev/null \
+AGENT_NAMES=$(curl -sf -H "$AUTH_HDR" "$API/api/ensemble/teams/$TEAM_ID" 2>/dev/null \
   | python3 -c "import json,sys; t=json.load(sys.stdin); print(' + '.join(a['name'] for a in t['team']['agents']))" 2>/dev/null \
   || echo "agents")
 echo -e "  ${BD}${G}Team is live!${R} ${W}${AGENT_NAMES}${R} are collaborating."

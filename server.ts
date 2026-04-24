@@ -9,6 +9,12 @@ import {
   getTeamFeed, sendTeamMessage, disbandTeam,
 } from './services/ensemble-service'
 import { getTeam } from './lib/ensemble-registry'
+import { verifyBearer, getAuthToken, getAuthTokenPath } from './lib/auth'
+import { logger } from './lib/logger'
+import {
+  writeMemory, queryMemories, deleteMemory, memoryStats,
+  type MemoryScope,
+} from './lib/memory-store'
 
 const PORT = parseInt(process.env.ENSEMBLE_PORT || process.env.ORCHESTRA_PORT || '23000', 10)
 const HOST = process.env.ENSEMBLE_HOST || '127.0.0.1'
@@ -123,13 +129,20 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (isRateLimited(getClientIp(req))) {
+    logger.warn('rate_limited', { ip: getClientIp(req), path, method })
     return json(res, { error: 'Rate limit exceeded' }, 429, origin)
   }
 
   try {
-    // Health check
+    // Health check — unauthenticated, liveness probe
     if (path === '/api/v1/health') {
       return json(res, { status: 'healthy', version: '1.0.0' }, 200, origin)
+    }
+
+    // Auth gate for all other endpoints
+    if (!verifyBearer(req.headers['authorization'])) {
+      logger.warn('auth_failed', { ip: getClientIp(req), path, method })
+      return json(res, { error: 'Unauthorized' }, 401, origin)
     }
 
     // List teams / Create team
@@ -205,24 +218,81 @@ const server = http.createServer(async (req, res) => {
       return json(res, result.data, result.status, origin)
     }
 
+    // Memory endpoints
+    if (path === '/api/ensemble/memory') {
+      if (method === 'GET') {
+        const scope = url.searchParams.get('scope') as MemoryScope | null
+        const teamId = url.searchParams.get('team') || undefined
+        const key = url.searchParams.get('key') || undefined
+        const tagsParam = url.searchParams.get('tags')
+        const tags = tagsParam ? tagsParam.split(',').map(t => t.trim()).filter(Boolean) : undefined
+        const limitParam = url.searchParams.get('limit')
+        const limit = limitParam ? parseInt(limitParam, 10) : undefined
+        const records = queryMemories({
+          scope: scope || undefined,
+          teamId, key, tags, limit,
+        })
+        return json(res, { memories: records }, 200, origin)
+      }
+      if (method === 'POST') {
+        let body: Record<string, unknown>
+        try { body = JSON.parse(await readBody(req)) } catch {
+          return json(res, { error: 'Bad Request: malformed JSON' }, 400, origin)
+        }
+        if (!body.scope || !body.key || body.value === undefined) {
+          return json(res, { error: 'scope, key, value required' }, 400, origin)
+        }
+        if (!['session', 'team', 'global'].includes(body.scope as string)) {
+          return json(res, { error: 'scope must be session|team|global' }, 400, origin)
+        }
+        const record = writeMemory({
+          scope: body.scope as MemoryScope,
+          teamId: (body.teamId as string) ?? null,
+          agent: (body.agent as string) ?? null,
+          key: body.key as string,
+          value: body.value,
+          tags: Array.isArray(body.tags) ? (body.tags as string[]) : [],
+          ttlSeconds: typeof body.ttlSeconds === 'number' ? body.ttlSeconds : undefined,
+        })
+        logger.info('memory_written', { id: record.id, scope: record.scope, key: record.key })
+        return json(res, { memory: record }, 201, origin)
+      }
+    }
+
+    if (path === '/api/ensemble/memory/stats' && method === 'GET') {
+      return json(res, memoryStats(), 200, origin)
+    }
+
+    const memoryIdMatch = path.match(/^\/api\/ensemble\/memory\/([^/]+)$/)
+    if (memoryIdMatch && method === 'DELETE') {
+      const deleted = deleteMemory(memoryIdMatch[1])
+      if (!deleted) return json(res, { error: 'not found' }, 404, origin)
+      return json(res, { deleted: true }, 200, origin)
+    }
+
     json(res, { error: 'Not found' }, 404, origin)
   } catch (err) {
-    console.error('[Server] Error:', err)
+    logger.error('server_error', { path, method, err: err instanceof Error ? err.message : String(err) })
     json(res, { error: 'Internal server error' }, 500, origin)
   }
 })
 
 server.on('error', (err: NodeJS.ErrnoException) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`[Ensemble] Port ${PORT} is already in use on ${HOST}. Stop the other process or set ENSEMBLE_PORT to a different port.`)
+    logger.error('port_in_use', { port: PORT, host: HOST })
     process.exit(1)
   }
 
-  console.error('[Ensemble] Server failed to start:', err)
+  logger.error('server_start_failed', { err: err.message, code: err.code })
   process.exit(1)
 })
 
 server.listen(PORT, HOST, () => {
-  console.log(`[Ensemble] Server running on http://${HOST}:${PORT}`)
-  console.log(`[Ensemble] Health: http://localhost:${PORT}/api/v1/health`)
+  // Force token initialization so operators see the path on first boot.
+  getAuthToken()
+  logger.info('server_started', {
+    host: HOST,
+    port: PORT,
+    auth_token_path: getAuthTokenPath(),
+  })
 })

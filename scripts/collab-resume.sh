@@ -7,6 +7,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/collab-paths.sh"
+source "$SCRIPT_DIR/ensemble-auth.sh"
+AUTH_HDR="$(ensemble_auth_header || true)"
 
 API="http://localhost:23000"
 
@@ -16,7 +18,7 @@ CHECK="${G}✓${R}"
 # ─── 1. Find team ───
 TEAM_ID="${1:-}"
 if [ -z "$TEAM_ID" ]; then
-  TEAM_ID=$(curl -sf "$API/api/ensemble/teams" 2>/dev/null | python3 -c "
+  TEAM_ID=$(curl -sf -H "$AUTH_HDR" "$API/api/ensemble/teams" 2>/dev/null | python3 -c "
 import json, sys
 teams = json.load(sys.stdin).get('teams', [])
 active = [t for t in teams if t.get('status') == 'active']
@@ -38,7 +40,7 @@ fi
 echo -e "\n  ${BD}${W}◈ ensemble resume${R}"
 
 # ─── 2. Verify team exists and is active ───
-TEAM_JSON=$(curl -sf "$API/api/ensemble/teams/$TEAM_ID" 2>/dev/null || true)
+TEAM_JSON=$(curl -sf -H "$AUTH_HDR" "$API/api/ensemble/teams/$TEAM_ID" 2>/dev/null || true)
 if [ -z "$TEAM_JSON" ]; then
   echo -e "  ${RED}✗${R} Team $TEAM_ID not found"; exit 1
 fi

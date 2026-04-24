@@ -39,9 +39,20 @@ const c = {
   bgBlue: '\x1b[44m', bgGreen: '\x1b[42m',
 }
 
+import { getAuthToken } from '../lib/auth'
+
+function authHeaders(urlPath: string): Record<string, string> {
+  if (urlPath === '/api/v1/health') return {}
+  try {
+    return { Authorization: `Bearer ${getAuthToken()}` }
+  } catch {
+    return {}
+  }
+}
+
 function apiGet<T>(urlPath: string): Promise<T> {
   return new Promise((resolve, reject) => {
-    http.get(`${API_BASE}${urlPath}`, { timeout: 3000 }, res => {
+    http.get(`${API_BASE}${urlPath}`, { timeout: 3000, headers: authHeaders(urlPath) }, res => {
       let d = ''
       res.on('data', chunk => d += chunk)
       res.on('end', () => { try { resolve(JSON.parse(d)) } catch(e) { reject(e) } })
@@ -54,7 +65,11 @@ function apiPost(urlPath: string, body: unknown): Promise<unknown> {
     const payload = JSON.stringify(body)
     const req = http.request(`${API_BASE}${urlPath}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(payload)) },
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': String(Buffer.byteLength(payload)),
+        ...authHeaders(urlPath),
+      },
       timeout: 5000,
     }, res => {
       let d = ''

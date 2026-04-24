@@ -10,6 +10,9 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./collab-paths.sh
 source "$SCRIPT_DIR/collab-paths.sh"
+# shellcheck source=./ensemble-auth.sh
+source "$SCRIPT_DIR/ensemble-auth.sh"
+AUTH_HDR="$(ensemble_auth_header || true)"
 
 TEAM_ID="${1:?Usage: collab-terminate.sh <team-id> [--disband]}"
 DISBAND=${2:-}
@@ -23,7 +26,7 @@ fi
 
 # Phase 1: server-side disband if requested
 if [ "$DISBAND" = "--disband" ]; then
-  curl -sf -X DELETE "$API/api/ensemble/teams/$TEAM_ID" >/dev/null 2>&1 || true
+  curl -sf -H "$AUTH_HDR" -X DELETE "$API/api/ensemble/teams/$TEAM_ID" >/dev/null 2>&1 || true
   echo "[terminate] server-side disband requested"
 fi
 

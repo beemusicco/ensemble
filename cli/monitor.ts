@@ -102,10 +102,21 @@ function getAgentStyle(name: string): AgentStyle {
 
 const API_BASE = process.env.ENSEMBLE_URL || 'http://localhost:23000'
 
+import { getAuthToken } from '../lib/auth'
+
+function monitorAuthHeaders(path: string): Record<string, string> {
+  if (path === '/api/v1/health') return {}
+  try {
+    return { Authorization: `Bearer ${getAuthToken()}` }
+  } catch {
+    return {}
+  }
+}
+
 function apiGet<T>(path: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const url = new URL(path, API_BASE)
-    http.get(url.toString(), { timeout: 5000 }, (res) => {
+    http.get(url.toString(), { timeout: 5000, headers: monitorAuthHeaders(path) }, (res) => {
       let data = ''
       res.on('data', chunk => data += chunk)
       res.on('end', () => {
@@ -122,7 +133,11 @@ function apiPost<T>(path: string, body: unknown): Promise<T> {
     const payload = JSON.stringify(body)
     const req = http.request(url.toString(), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+        ...monitorAuthHeaders(path),
+      },
       timeout: 5000,
     }, (res) => {
       let data = ''

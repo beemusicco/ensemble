@@ -139,9 +139,13 @@ describe('onboarding smoke test', () => {
     })).stdout
     expect(teamsBeforeOutput).toContain('No teams found')
 
+    const { getAuthToken } = await import('../lib/auth')
     const createResponse = await fetch(`${baseUrl}/api/ensemble/teams`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${getAuthToken()}`,
+      },
       body: JSON.stringify({
         name: 'my-first-team',
         description: 'Review the README and suggest improvements',

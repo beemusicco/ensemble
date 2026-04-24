@@ -6,6 +6,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./collab-paths.sh
 source "$SCRIPT_DIR/collab-paths.sh"
+# shellcheck source=./ensemble-auth.sh
+source "$SCRIPT_DIR/ensemble-auth.sh"
+if [ -z "${ENSEMBLE_AUTH_TOKEN:-}" ]; then
+  ENSEMBLE_AUTH_TOKEN="$(ensemble_auth_token || true)"
+  export ENSEMBLE_AUTH_TOKEN
+fi
 
 TEAM_ID="${1:?Usage: ensemble-bridge.sh <team-id>}"
 API="${2:-http://localhost:23000}"
@@ -75,13 +81,14 @@ while true; do
   if [ "$TOTAL" -gt "$POSTED" ]; then
     # Process new lines — only advance posted counter on success.
     NEW_POSTED=$(python3 -c "
-import json, sys, time, urllib.error, urllib.request
+import json, os, sys, time, urllib.error, urllib.request
 from itertools import islice
 
 team_id = '$TEAM_ID'
 api = '$API'
 posted = $POSTED
 last_success = posted
+auth_token = os.environ.get('ENSEMBLE_AUTH_TOKEN', '').strip()
 
 with open('$FILE') as f:
     for i, line in enumerate(islice(f, posted, None), start=posted):
@@ -114,10 +121,13 @@ with open('$FILE') as f:
             'timestamp': msg.get('timestamp',''),
         }).encode()
 
+        headers = {'Content-Type': 'application/json'}
+        if auth_token:
+            headers['Authorization'] = f'Bearer {auth_token}'
         req = urllib.request.Request(
             f'{api}/api/ensemble/teams/{team_id}',
             data=data,
-            headers={'Content-Type': 'application/json'},
+            headers=headers,
             method='POST'
         )
         success = False
