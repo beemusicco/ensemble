@@ -284,6 +284,39 @@ switch (cmd) {
   case 'health':
     await cmdStatus()
     break
+  case 'auth': {
+    const sub = args[0] || 'show'
+    const { getAuthTokenPath } = await import('../lib/auth')
+    if (sub === 'path') {
+      console.log(getAuthTokenPath())
+    } else if (sub === 'show' || sub === 'print') {
+      console.log(getAuthToken())
+    } else if (sub === 'share') {
+      const token = getAuthToken()
+      console.log(`${c.bold}${c.bWhite}Team onboarding snippet${c.r} — paste this into your teammate's shell:`)
+      console.log('')
+      console.log(`  ${c.green}export ENSEMBLE_URL=${API_BASE}${c.r}`)
+      console.log(`  ${c.green}export ENSEMBLE_AUTH_TOKEN=${token}${c.r}`)
+      console.log('')
+      console.log(`${c.yellow}⚠  Share this via 1Password / Bitwarden / Keychain, NOT email or chat.${c.r}`)
+      console.log(`   Rotating: delete ~/.ensemble/auth-token, restart server, re-share.`)
+    } else if (sub === 'rotate') {
+      const filePath = getAuthTokenPath()
+      try { fs.unlinkSync(filePath) } catch { /* ok if absent */ }
+      const newToken = getAuthToken()
+      console.log(`${c.bGreen}●${c.r} new token minted at ${c.dim}${filePath}${c.r}`)
+      console.log(`${c.yellow}⚠  Restart the ensemble server so in-flight auth checks use the new token.${c.r}`)
+      console.log(`   Then re-share with your team: ${c.bold}ensemble auth share${c.r}`)
+      console.log(`   token (save securely): ${newToken}`)
+    } else {
+      console.log(`Usage: ensemble auth [show|path|share|rotate]`)
+      console.log(`  show    print the current token (default)`)
+      console.log(`  path    print the file path holding the token`)
+      console.log(`  share   print an env-var snippet to paste into a teammate's shell`)
+      console.log(`  rotate  mint a new token (invalidates the old one after restart)`)
+    }
+    break
+  }
   case 'run': {
     const runArgs = [...args]
     let agentList: string | undefined
@@ -342,6 +375,7 @@ switch (cmd) {
     ${c.bWhite}teams${c.r}                      List all teams
     ${c.bWhite}steer${c.r} <id> <message>       Send steering message to team
     ${c.bWhite}status${c.r}                     Server health & overview
+    ${c.bWhite}auth${c.r} [show|share|rotate]   Manage the API token (team onboarding)
 
   ${c.bold}Monitor keybindings:${c.r}
     ${c.bWhite}s${c.r}       Steer entire team
