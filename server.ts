@@ -6,7 +6,7 @@
 import http from 'http'
 import {
   createEnsembleTeam, getEnsembleTeam, listEnsembleTeams,
-  getTeamFeed, sendTeamMessage, disbandTeam,
+  getTeamFeed, sendTeamMessage, disbandTeam, signalCompleteTeam,
 } from './services/ensemble-service'
 import { getTeam } from './lib/ensemble-registry'
 import { verifyBearer, getAuthToken, getAuthTokenPath } from './lib/auth'
@@ -205,6 +205,23 @@ const server = http.createServer(async (req, res) => {
     const disbandMatch = path.match(/^\/api\/ensemble\/teams\/([^/]+)\/disband$/)
     if (disbandMatch && method === 'POST') {
       const result = await disbandTeam(disbandMatch[1])
+      if (result.error) return json(res, { error: result.error }, result.status, origin)
+      return json(res, result.data, result.status, origin)
+    }
+
+    // Explicit completion signal: /api/ensemble/teams/:id/signal-complete
+    const signalMatch = path.match(/^\/api\/ensemble\/teams\/([^/]+)\/signal-complete$/)
+    if (signalMatch && method === 'POST') {
+      let body: Record<string, unknown> = {}
+      const raw = await readBody(req)
+      if (raw.trim()) {
+        try { body = JSON.parse(raw) } catch {
+          return json(res, { error: 'Bad Request: malformed JSON' }, 400, origin)
+        }
+      }
+      const from = (body.from as string) || ''
+      if (!from) return json(res, { error: 'from required' }, 400, origin)
+      const result = await signalCompleteTeam(signalMatch[1], from, body.note as string | undefined)
       if (result.error) return json(res, { error: result.error }, result.status, origin)
       return json(res, result.data, result.status, origin)
     }

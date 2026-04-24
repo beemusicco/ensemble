@@ -361,6 +361,7 @@ export function buildPromptPreview(params: {
   const scriptsDir = path.join(__dirname, '..', 'scripts')
   const teamSayCmd = `${scriptsDir}/team-say.sh ${params.teamId} ${params.agentName} ${params.teammateNames[0] || 'team'}`
   const teamReadCmd = `${scriptsDir}/team-read.sh ${params.teamId}`
+  const teamDoneCmd = `${scriptsDir}/team-done.sh ${params.teamId} ${params.agentName}`
   const teamRememberCmd = `${scriptsDir}/team-remember.sh`
   const teamRecallCmd = `${scriptsDir}/team-recall.sh`
   const safeDescription = sanitizeTaskDescription(params.description)
@@ -426,7 +427,7 @@ export function buildPromptPreview(params: {
     `4. After EVERY team-say, run team-read to check for responses`,
     `5. If teammate shared findings, RESPOND to them`,
     `6. Keep alternating: analyze, share, read, respond, analyze`,
-    `7. When your part of the task is complete, emit [DONE] in a team-say message (literal brackets required) so the team can close cleanly. Do not linger with polite sign-offs after [DONE].`,
+    `7. When the task is DONE — not earlier, not "almost done" — run: ${teamDoneCmd} "one-line summary". This is the ONLY reliable way to close the team. Do not emit [DONE] in text; it is no longer auto-detected. Running team-done disbands the team immediately, so don't call it until you're truly finished.`,
     `MEMORY (persists across sessions):`,
     `  Save a durable finding for future teams: ${teamRememberCmd} global <key> "<value>" [--tags=a,b]`,
     `  Recall prior findings: ${teamRecallCmd} [--scope=global] [--tags=a,b]`,
@@ -1033,4 +1034,27 @@ export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team:
 
   endSpan(span, { disbandedAt: updated?.completedAt })
   return { data: { team: updated! }, status: 200 }
+}
+
+/**
+ * Explicit completion signal from an agent. Replaces the fragile regex-based
+ * auto-disband for tasks where agents can deterministically say "I'm done."
+ * Posts a structured [SIGNAL_COMPLETE] message so every observer sees it,
+ * then disbands the team (no idle-tax, no pattern guessing).
+ */
+export async function signalCompleteTeam(
+  teamId: string, from: string, note?: string,
+): Promise<ServiceResult<{ team: EnsembleTeam }>> {
+  const team = getTeam(teamId)
+  if (!team) return { error: 'Team not found', status: 404 }
+  const validSenders = new Set([...team.agents.map(a => a.name), 'user', 'ensemble'])
+  if (!validSenders.has(from)) {
+    return { error: `Unauthorized sender: ${from}`, status: 403 }
+  }
+  appendMessage(teamId, {
+    id: uuidv4(), teamId, from, to: 'team',
+    content: `[SIGNAL_COMPLETE]${note ? ' ' + note.slice(0, 500) : ''}`,
+    type: 'chat', timestamp: new Date().toISOString(),
+  })
+  return disbandTeam(teamId)
 }
