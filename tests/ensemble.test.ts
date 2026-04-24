@@ -306,11 +306,12 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
   })
 
-  it('auto-disbands when one high-confidence signal exists and team is idle for more than 120s', async () => {
+  it('auto-disbands when one high-confidence signal exists and team is idle past SINGLE_SIGNAL_IDLE (default 180s)', async () => {
     const team = makeTeam()
+    // now = 12:05:00; last team msg at 12:01:30 → 210s idle > 180s threshold
     const messages: EnsembleMessage[] = [
-      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[DONE] my part', timestamp: '2026-03-18T12:02:30.000Z' }),
-      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still investigating', timestamp: '2026-03-18T12:02:40.000Z' }),
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[DONE] my part', timestamp: '2026-03-18T12:01:20.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still investigating', timestamp: '2026-03-18T12:01:30.000Z' }),
     ]
 
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
@@ -319,11 +320,12 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
   })
 
-  it('auto-disbands on low-confidence signals after extended idle (5min)', async () => {
+  it('auto-disbands on low-confidence signals after extended idle (default 15min)', async () => {
     const team = makeTeam()
+    // now = 12:05:00; last team msg at 11:49:00 → 960s idle > 900s threshold
     const messages: EnsembleMessage[] = [
-      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Task is done', timestamp: '2026-03-18T11:58:00.000Z' }),
-      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Wrapping up', timestamp: '2026-03-18T11:58:10.000Z' }),
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Task is done', timestamp: '2026-03-18T11:48:50.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Wrapping up', timestamp: '2026-03-18T11:49:00.000Z' }),
     ]
 
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
@@ -395,9 +397,10 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
 
   it('ignores ensemble messages when determining idle time', async () => {
     const team = makeTeam()
+    // now = 12:05:00; last NON-ensemble team msg at 12:01:35 → 205s idle > 180s
     const messages: EnsembleMessage[] = [
-      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[DONE]', timestamp: '2026-03-18T12:02:30.000Z' }),
-      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still working', timestamp: '2026-03-18T12:02:35.000Z' }),
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[DONE]', timestamp: '2026-03-18T12:01:30.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still working', timestamp: '2026-03-18T12:01:35.000Z' }),
       makeMessage({ from: 'ensemble', teamId: 'team-1', content: 'Agent joined', timestamp: '2026-03-18T12:04:55.000Z' }),
     ]
 

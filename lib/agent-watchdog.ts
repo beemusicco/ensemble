@@ -5,8 +5,13 @@ import type { AgentRuntime } from './agent-runtime'
 import type { EnsembleMessage, EnsembleTeam } from '../types/ensemble'
 
 const DEFAULT_POLL_INTERVAL_MS = 30_000
-const DEFAULT_NUDGE_MS = 90_000
-const DEFAULT_STALL_MS = 180_000
+// Bumped from 90s/180s after a timeout audit: real agent work (codebase
+// read + reasoning + file edits + running tests) routinely burns >90s of
+// team-say silence per productive cycle. Old values caused premature
+// "are you working?" nudges that forced the agent out of deep thinking
+// into reflex [PROGRESS] replies. Still overridable via ENV.
+const DEFAULT_NUDGE_MS = 180_000
+const DEFAULT_STALL_MS = 420_000
 // Replaced generic "are you working" nudge — the old text rewarded chatter and
 // reset idle timers on "Idle." / "Still working." replies. New text forces the
 // agent to produce evidence (file list + diff) or emit [DONE]. Pure status

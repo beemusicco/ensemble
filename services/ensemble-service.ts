@@ -44,8 +44,19 @@ interface ServiceResult<T> {
 
 const IDLE_CHECK_INTERVAL_MS = 15_000
 const COMPLETION_SIGNAL_WINDOW_MS = 60_000
-const SINGLE_SIGNAL_IDLE_THRESHOLD_MS = 120_000
-const LOW_CONFIDENCE_IDLE_THRESHOLD_MS = 300_000
+
+function parseEnvMs(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (!raw) return fallback
+  const n = parseInt(raw, 10)
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
+// Primary completion path is now the explicit signal-complete endpoint
+// (scripts/team-done.sh). These pattern-based thresholds are safety nets
+// for runaway sessions and legacy integrations — generous by design.
+const SINGLE_SIGNAL_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_SINGLE_SIGNAL_IDLE_MS', 180_000)
+const LOW_CONFIDENCE_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_LOW_CONF_IDLE_MS', 900_000)
 
 const HIGH_CONFIDENCE_COMPLETION = [
   /\[DONE\]/i,
