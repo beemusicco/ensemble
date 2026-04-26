@@ -651,6 +651,58 @@ describe('team-say — output format', () => {
     expect(msg2.content).toBe('Second')
     expect(msg1.id).not.toBe(msg2.id)
   })
+
+  // Defensive parsing — 112 historical empty-content msgs were caused by agents
+  // (haiku/codex-mini especially) collapsing addressee + message into one
+  // shell-quoted arg. Old parser sliced $3 as TO and left MSG empty, yielding
+  // {to: "claude-1, codex-2: actual message", content: ""}.
+  it('collapsed-arg form: 3 args with multicast addressee in $3 routes whole arg to content', () => {
+    execFileSync(
+      TEAM_SAY_BIN,
+      [testTeamId, 'haiku-3', 'claude-1, codex-2: Starting Round 10. Ready for PHASE 1.'],
+      { encoding: 'utf-8' },
+    )
+    const msg = JSON.parse(fs.readFileSync(outputFile, 'utf-8').trim())
+    expect(msg.from).toBe('haiku-3')
+    expect(msg.to).toBe('team')
+    expect(msg.content).toBe('claude-1, codex-2: Starting Round 10. Ready for PHASE 1.')
+    expect(msg.content).not.toBe('')
+  })
+
+  it('3-arg form: TID FROM "message" with no addressee uses to="team"', () => {
+    execFileSync(
+      TEAM_SAY_BIN,
+      [testTeamId, 'codex-1', 'this is a broadcast finding'],
+      { encoding: 'utf-8' },
+    )
+    const msg = JSON.parse(fs.readFileSync(outputFile, 'utf-8').trim())
+    expect(msg.to).toBe('team')
+    expect(msg.content).toBe('this is a broadcast finding')
+  })
+
+  it('refuses to write empty-content messages (exit code 3, stderr explanation)', () => {
+    expect(() => {
+      execFileSync(TEAM_SAY_BIN, [testTeamId, 'codex-1', 'claude-2', ''], { stdio: 'pipe' })
+    }).toThrow()
+    // No file should have been created — the empty-message guard short-circuits
+    // before any write to messages.jsonl.
+    expect(fs.existsSync(outputFile)).toBe(false)
+  })
+
+  it('refuses to write whitespace-only content', () => {
+    expect(() => {
+      execFileSync(TEAM_SAY_BIN, [testTeamId, 'codex-1', 'claude-2', '   \n\t  '], { stdio: 'pipe' })
+    }).toThrow()
+    expect(fs.existsSync(outputFile)).toBe(false)
+  })
+
+  it('canonical 4-arg form still routes correctly (regression guard)', () => {
+    execFileSync(TEAM_SAY_BIN, [testTeamId, 'codex-1', 'claude-2', 'normal canonical message'])
+    const msg = JSON.parse(fs.readFileSync(outputFile, 'utf-8').trim())
+    expect(msg.from).toBe('codex-1')
+    expect(msg.to).toBe('claude-2')
+    expect(msg.content).toBe('normal canonical message')
+  })
 })
 
 // ─────────────────────────────────────────────────────
