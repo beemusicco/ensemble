@@ -5,7 +5,7 @@ import type {
   StagedWorkflowConfig,
 } from '../types/ensemble'
 import { appendMessage, getMessages } from './ensemble-registry'
-import { getRuntime } from './agent-runtime'
+import { getRuntime, SessionGoneError } from './agent-runtime'
 import { resolveAgentProgram } from './agent-config'
 import { collabDeliveryFile } from './collab-paths'
 import { isSelf, getHostById } from './hosts-config'
@@ -132,7 +132,7 @@ export class StagedWorkflowManager {
 
     this.log('plan', 'Starting PLAN phase — agents may only plan and coordinate')
     const planStartedAt = this.now().toISOString()
-    await Promise.all(this.agents.map((agent, index) => this.deliverPlanPrompt(agent, index)))
+    await this.deliverPhasePrompts('plan', this.agents.map((agent, index) => () => this.deliverPlanPrompt(agent, index)))
 
     const planResult = await this.waitForConditionOrTimeout(
       () => this.agentsSharedPlans(planStartedAt),
@@ -160,7 +160,7 @@ export class StagedWorkflowManager {
 
     this.log('exec', 'Starting EXEC phase — agents may now implement')
     const execStartedAt = this.now().toISOString()
-    await Promise.all(this.agents.map(async (agent, index) => {
+    await this.deliverPhasePrompts('exec', this.agents.map((agent, index) => async () => {
       if (slowPlanAgents.includes(agent.name)) {
         const teammates = this.agentNames().filter(name => name !== agent.name)
         const base = (this.options.buildExecPrompt || defaultExecPrompt)({ agent, teammates, index })
@@ -197,7 +197,7 @@ export class StagedWorkflowManager {
 
     this.log('verify', 'Starting VERIFY phase — agents review each other\'s work')
     const verifyStartedAt = this.now().toISOString()
-    await Promise.all(this.agents.map(async (agent, index) => {
+    await this.deliverPhasePrompts('verify', this.agents.map((agent, index) => async () => {
       if (slowExecAgents.includes(agent.name)) {
         const teammates = this.agentNames().filter(name => name !== agent.name)
         const base = (this.options.buildVerifyPrompt || defaultVerifyPrompt)({
@@ -221,6 +221,36 @@ export class StagedWorkflowManager {
           ? 'All agents completed verification ([VERIFY_DONE])'
           : `VERIFY phase window elapsed after ${Math.round(this.config.verifyTimeoutMs / 1000)}s`,
       )
+    }
+  }
+
+  /**
+   * Deliver one phase's prompts to all agents in parallel using allSettled.
+   * Previously we used Promise.all, which meant ONE agent's session-gone error
+   * (typical when watchdog/team-done disbands mid-phase) rejected the whole
+   * phase delivery — the staged-workflow then crashed with "Staged workflow
+   * failed for X" and the surviving agents were stranded with the previous
+   * phase's prompt while their teammates moved on.
+   *
+   * allSettled lets each agent's delivery succeed or fail independently.
+   * SessionGoneError is already caught + logged in deliverToAgent, so a
+   * rejection here means a real unexpected error — we re-throw the FIRST one
+   * after the phase finishes so the caller sees a real failure (not a swallow).
+   */
+  private async deliverPhasePrompts(
+    phase: 'plan' | 'exec' | 'verify',
+    deliverers: Array<() => Promise<void>>,
+  ): Promise<void> {
+    const results = await Promise.allSettled(deliverers.map(d => d()))
+    const realFailures = results
+      .map((r, i) => ({ r, i }))
+      .filter(({ r }) => r.status === 'rejected')
+    if (realFailures.length > 0) {
+      const reasons = realFailures
+        .map(({ r, i }) => `agent[${i}]: ${(r as PromiseRejectedResult).reason}`)
+        .join('; ')
+      this.log(phase, `Phase ${phase.toUpperCase()} delivery had ${realFailures.length} unexpected failure(s): ${reasons}`)
+      throw (realFailures[0].r as PromiseRejectedResult).reason
     }
   }
 
@@ -254,21 +284,51 @@ export class StagedWorkflowManager {
     if (agent.hostId && !isSelf(agent.hostId)) {
       const host = getHostById(agent.hostId)
       if (host) {
-        await postRemoteSessionCommand(host.url, sessionName, text)
+        try {
+          await postRemoteSessionCommand(host.url, sessionName, text)
+        } catch (err) {
+          this.logSessionGoneOrRethrow(agent.name, err)
+        }
       }
       return
     }
 
     const agentCfg = resolveAgentProgram(agent.program)
-    if (agentCfg.inputMethod === 'pasteFromFile') {
-      const tmpFile = collabDeliveryFile(this.options.team.id, sessionName)
-      fs.mkdirSync(path.dirname(tmpFile), { recursive: true })
-      fs.writeFileSync(tmpFile, text)
-      await runtime.pasteFromFile(sessionName, tmpFile)
-      return
+    try {
+      if (agentCfg.inputMethod === 'pasteFromFile') {
+        const tmpFile = collabDeliveryFile(this.options.team.id, sessionName)
+        fs.mkdirSync(path.dirname(tmpFile), { recursive: true })
+        fs.writeFileSync(tmpFile, text)
+        await runtime.pasteFromFile(sessionName, tmpFile)
+        return
+      }
+      await runtime.sendKeys(sessionName, text, { literal: true, enter: true })
+    } catch (err) {
+      this.logSessionGoneOrRethrow(agent.name, err)
     }
+  }
 
-    await runtime.sendKeys(sessionName, text, { literal: true, enter: true })
+  /**
+   * Race between staged-workflow phase delivery and team disband: by the time
+   * we run paste-buffer, the agent's tmux session may already be killed. Treat
+   * SessionGoneError as a benign skip (log a structured warning so it surfaces
+   * in the team feed but doesn't tank the phase delivery for the other agents).
+   * Real errors still propagate.
+   */
+  private logSessionGoneOrRethrow(agentName: string, err: unknown): void {
+    const isSessionGone =
+      err instanceof SessionGoneError ||
+      (err instanceof Error && /can't find pane|no such session|session not found/i.test(err.message))
+    if (!isSessionGone) throw err
+    appendMessage(this.options.team.id, {
+      id: uuidv4(),
+      teamId: this.options.team.id,
+      from: 'ensemble',
+      to: 'team',
+      content: `⚠️ Skipped phase prompt delivery to ${agentName} — session already gone (team disbanded mid-flight)`,
+      type: 'chat',
+      timestamp: this.now().toISOString(),
+    })
   }
 
   private resetCursor(): void {

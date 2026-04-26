@@ -14,6 +14,25 @@ import { promisify } from 'util'
 const execAsync = promisify(exec)
 
 // ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown when a tmux operation targets a session that has already been killed.
+ * The most common cause is a race between staged-workflow phase delivery and
+ * team disband (watchdog or explicit team-done). Callers should treat this as
+ * a benign "team is gone, skip" rather than a workflow failure.
+ */
+export class SessionGoneError extends Error {
+  readonly sessionName: string
+  constructor(sessionName: string) {
+    super(`tmux session "${sessionName}" no longer exists (likely disbanded mid-flight)`)
+    this.name = 'SessionGoneError'
+    this.sessionName = sessionName
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Interface
 // ---------------------------------------------------------------------------
 
@@ -224,9 +243,18 @@ export class TmuxRuntime implements AgentRuntime {
    * Paste text from a file into the pane via tmux load-buffer + paste-buffer.
    * More reliable than send-keys -l for TUI apps (e.g., Codex) that don't
    * handle literal key injection well. Sends Enter after pasting.
+   *
+   * Pre-checks session existence and throws SessionGoneError when the session
+   * has died. Without this, callers (notably staged-workflow phase delivery)
+   * see opaque "tmux paste-buffer ... can't find pane" shell errors that bubble
+   * up as "Staged workflow failed for X" with no graceful handling. Typed
+   * error lets the caller distinguish a disbanded-team race from real bugs.
    */
   async pasteFromFile(name: string, filePath: string): Promise<void> {
     const sName = this.sanitizeName(name)
+    if (!(await this.sessionExists(sName))) {
+      throw new SessionGoneError(sName)
+    }
     const bufName = `orch-${sName}`
     const sPath = filePath.replace(/[^a-zA-Z0-9\-_./~ ]/g, '')
     await execAsync(`tmux load-buffer -b "${bufName}" "${sPath}"`)
