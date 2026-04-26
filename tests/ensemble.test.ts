@@ -277,7 +277,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(true)
   })
 
   it('does NOT auto-disband on low-confidence signals within 60s', async () => {
@@ -290,7 +290,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(false)
   })
 
   it('does NOT auto-disband when only one high-confidence signal exists and idle is <= 120s', async () => {
@@ -303,7 +303,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(false)
   })
 
   it('auto-disbands when one high-confidence signal exists and team is idle past SINGLE_SIGNAL_IDLE (default 600s)', async () => {
@@ -317,7 +317,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(true)
   })
 
   it('does NOT auto-disband on a single high-confidence signal when idle is under the new 600s threshold', async () => {
@@ -332,7 +332,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(false)
   })
 
   it('auto-disbands on low-confidence signals after extended idle (default 30min)', async () => {
@@ -346,7 +346,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(true)
   })
 
   it('does NOT auto-disband when "done" is embedded mid-message in a long progress update', async () => {
@@ -366,7 +366,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(false)
   })
 
   it('does NOT auto-disband when agents have no completion signal', async () => {
@@ -379,7 +379,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(false)
   })
 
   it('does NOT auto-disband when last message has no timestamp', async () => {
@@ -396,7 +396,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     await mod.checkIdleTeams()
 
     // Messages without timestamp get sorted last, and NaN timestamp → return false
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(false)
   })
 
   it('does NOT auto-disband when team has no active agents', async () => {
@@ -413,7 +413,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(false)
   })
 
   it('does NOT auto-disband when signals come from the same agent only', async () => {
@@ -427,7 +427,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(false)
   })
 
   it('ignores ensemble messages when determining idle time', async () => {
@@ -443,7 +443,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(true)
   })
 
   it('auto-disbands on staged [EXEC_DONE] signals from two different agents within 60s', async () => {
@@ -456,7 +456,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(true)
   })
 
   it('auto-disbands on staged [VERIFY_DONE] signals from two different agents within 60s', async () => {
@@ -469,7 +469,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
-    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(true)
   })
 
   it('bridge-zombie guard: does NOT auto-disband when messages.jsonl mtime is fresher than registry last-message', async () => {
@@ -493,7 +493,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     try {
       const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
       await mod.checkIdleTeams()
-      expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
+      expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(false)
     } finally {
       fs.rmSync(runtimeDir, { recursive: true, force: true })
     }

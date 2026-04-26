@@ -112,11 +112,11 @@ class EnsembleService {
       loadTeams,
       getMessages: (teamId: string) => getMessages(teamId),
       appendMessage,
-      disbandTeam: async (teamId: string, _reason: string) => {
+      disbandTeam: async (teamId: string, reason: string) => {
         if (this.disbandingTeams.has(teamId)) return
         this.disbandingTeams.add(teamId)
         try {
-          await disbandTeam(teamId)
+          await disbandTeam(teamId, `watchdog: ${reason}`, { triggeredBy: 'watchdog' })
         } finally {
           this.disbandingTeams.delete(teamId)
         }
@@ -149,17 +149,9 @@ class EnsembleService {
       this.disbandingTeams.add(team.id)
 
       try {
-        appendMessage(team.id, {
-          id: uuidv4(),
-          teamId: team.id,
-          from: 'ensemble',
-          to: 'team',
-          content: 'Auto-disband triggered after 60s idle and completion-like agent messages',
-          type: 'chat',
-          timestamp: new Date().toISOString(),
+        await disbandTeam(team.id, 'idle-tax: completion signal + idle threshold', {
+          triggeredBy: 'idle-checker',
         })
-
-        await disbandTeam(team.id)
       } catch (err) {
         console.error(`[Ensemble] Auto-disband failed for ${team.id}:`, err)
       } finally {
@@ -677,9 +669,15 @@ async function createEnsembleTeamInner(
 
     // 60s was tight for cold-starting claude with --model verification on a
     // busy system — bumped to 120s, overridable via env for slow hosts.
+    // Bumped 120s→180s (FIX G) — Codex/Claude CLIs occasionally hit a slow
+    // login flow (OAuth refresh, rate-limit warning banner) that pushes the
+    // ready marker past the previous 2-minute window. Agents in that state
+    // were marked failed and the team aborted with "only N/M agents ready"
+    // even though they would have come up in another 30-60s. Still
+    // env-tunable via ENSEMBLE_READY_TIMEOUT_MS.
     const defaultReadyTimeout = Number.parseInt(
-      process.env['ENSEMBLE_READY_TIMEOUT_MS'] ?? '120000', 10,
-    ) || 120000
+      process.env['ENSEMBLE_READY_TIMEOUT_MS'] ?? '180000', 10,
+    ) || 180000
     const waitForReady = async (
       sessionName: string, program: string, hostId?: string, maxWait = defaultReadyTimeout,
     ): Promise<boolean> => {
@@ -1010,8 +1008,12 @@ export async function writeDisbandSummary(teamId: string): Promise<Record<string
   return tokenUsageMap
 }
 
-export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team: EnsembleTeam }>> {
-  const span = startSpan('disband_team', { teamId })
+export async function disbandTeam(
+  teamId: string,
+  reason: string = 'manual',
+  meta?: Record<string, unknown>,
+): Promise<ServiceResult<{ team: EnsembleTeam }>> {
+  const span = startSpan('disband_team', { teamId, reason })
   const team = getTeam(teamId)
   if (!team) {
     endSpan(span, {}, 'team_not_found')
@@ -1019,6 +1021,34 @@ export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team:
   }
   span.attributes.agentCount = team.agents.length
   span.attributes.createdAt = team.createdAt
+
+  // FIX A: structured disband-reason marker.
+  // Every disband (watchdog, idle-tax, manual, signal-complete) writes a
+  // single typed message with `reason` and free-form `meta`. Without this,
+  // diagnosing premature kills required correlating ensemble.err.log against
+  // JSONL — slow and lossy. With it, `team-history feed <id>` shows the kill
+  // cause inline.
+  appendMessage(teamId, {
+    id: uuidv4(),
+    teamId,
+    from: 'ensemble',
+    to: 'team',
+    content: `🛑 Team disband triggered — reason: ${reason}`,
+    type: 'chat',
+    timestamp: new Date().toISOString(),
+    meta: { event: 'disband', reason, ...(meta ?? {}) },
+  })
+
+  // FIX D: write .finished BEFORE killing sessions so the bridge sees the
+  // marker and exits cleanly, instead of racing against tmux paste-buffer
+  // failures during the kill loop. Bridge auto-exit is keyed on .finished
+  // existence (see scripts/ensemble-bridge.sh).
+  try {
+    fs.writeFileSync(
+      collabFinishedMarker(teamId),
+      JSON.stringify({ reason, timestamp: new Date().toISOString(), ...(meta ?? {}) }) + '\n',
+    )
+  } catch { /* non-fatal */ }
 
   // Write summary before killing sessions so the Claude Code session can
   // present it. writeDisbandSummary already scraped tmux panes for token
@@ -1107,14 +1137,14 @@ export async function disbandTeam(teamId: string): Promise<ServiceResult<{ team:
     })
   }
 
-  // Soft cleanup: remove ephemeral files, keep messages/summary/log, write .finished marker
+  // Soft cleanup: remove ephemeral files, keep messages/summary/log.
+  // .finished was already written before the kill loop (see FIX D above).
   try {
     const deliveryDir = path.join(collabRuntimeDir(teamId), 'delivery')
     if (fs.existsSync(deliveryDir)) fs.rmSync(deliveryDir, { recursive: true, force: true })
     for (const f of [collabBridgeResult(teamId), collabBridgePosted(teamId)]) {
       if (fs.existsSync(f)) fs.unlinkSync(f)
     }
-    fs.writeFileSync(collabFinishedMarker(teamId), new Date().toISOString())
   } catch { /* non-fatal cleanup */ }
 
   // Optional: save session summary to claude-mem
@@ -1259,5 +1289,9 @@ export async function signalCompleteTeam(
     content: `[SIGNAL_COMPLETE]${note ? ' ' + note.slice(0, 500) : ''}`,
     type: 'chat', timestamp: new Date().toISOString(),
   })
-  return disbandTeam(teamId)
+  return disbandTeam(teamId, `signal-complete by ${from}`, {
+    triggeredBy: 'signal-complete',
+    by: from,
+    note: note?.slice(0, 200),
+  })
 }

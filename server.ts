@@ -227,7 +227,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, result.data, result.status, origin)
       }
       if (method === 'DELETE') {
-        const result = await disbandTeam(teamId)
+        const result = await disbandTeam(teamId, 'manual: HTTP DELETE', { triggeredBy: 'http-delete' })
         if (result.error) return json(res, { error: result.error }, result.status, origin)
         return json(res, result.data, result.status, origin)
       }
@@ -236,7 +236,7 @@ const server = http.createServer(async (req, res) => {
     // Disband: /api/ensemble/teams/:id/disband
     const disbandMatch = path.match(/^\/api\/ensemble\/teams\/([^/]+)\/disband$/)
     if (disbandMatch && method === 'POST') {
-      const result = await disbandTeam(disbandMatch[1])
+      const result = await disbandTeam(disbandMatch[1], 'manual: explicit disband endpoint', { triggeredBy: 'http-disband' })
       if (result.error) return json(res, { error: result.error }, result.status, origin)
       return json(res, result.data, result.status, origin)
     }
