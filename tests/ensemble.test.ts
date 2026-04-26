@@ -306,12 +306,12 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
   })
 
-  it('auto-disbands when one high-confidence signal exists and team is idle past SINGLE_SIGNAL_IDLE (default 180s)', async () => {
+  it('auto-disbands when one high-confidence signal exists and team is idle past SINGLE_SIGNAL_IDLE (default 600s)', async () => {
     const team = makeTeam()
-    // now = 12:05:00; last team msg at 12:01:30 → 210s idle > 180s threshold
+    // now = 12:05:00; last team msg at 11:54:30 → 630s idle > 600s threshold
     const messages: EnsembleMessage[] = [
-      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[DONE] my part', timestamp: '2026-03-18T12:01:20.000Z' }),
-      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still investigating', timestamp: '2026-03-18T12:01:30.000Z' }),
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[DONE] my part', timestamp: '2026-03-18T11:54:20.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still investigating', timestamp: '2026-03-18T11:54:30.000Z' }),
     ]
 
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
@@ -320,18 +320,53 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
   })
 
-  it('auto-disbands on low-confidence signals after extended idle (default 15min)', async () => {
+  it('does NOT auto-disband on a single high-confidence signal when idle is under the new 600s threshold', async () => {
     const team = makeTeam()
-    // now = 12:05:00; last team msg at 11:49:00 → 960s idle > 900s threshold
+    // now = 12:05:00; last team msg at 12:00:00 → 300s idle < 600s threshold.
+    // Old default would have killed this; new default keeps the team alive.
     const messages: EnsembleMessage[] = [
-      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Task is done', timestamp: '2026-03-18T11:48:50.000Z' }),
-      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Wrapping up', timestamp: '2026-03-18T11:49:00.000Z' }),
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[VERIFY_DONE] phase 1 — handing off', timestamp: '2026-03-18T11:59:50.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Reading paper_trader.py main loop', timestamp: '2026-03-18T12:00:00.000Z' }),
+    ]
+
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+
+    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
+  })
+
+  it('auto-disbands on low-confidence signals after extended idle (default 30min)', async () => {
+    const team = makeTeam()
+    // now = 12:05:00; last team msg at 11:34:30 → 1830s idle > 1800s threshold
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Task is done', timestamp: '2026-03-18T11:34:20.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Wrapping up', timestamp: '2026-03-18T11:34:30.000Z' }),
     ]
 
     const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
     await mod.checkIdleTeams()
 
     expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(true)
+  })
+
+  it('does NOT auto-disband when "done" is embedded mid-message in a long progress update', async () => {
+    const team = makeTeam()
+    // 30+ minutes idle would have tripped the old guardless low-conf path.
+    // The new tail-position guard rejects "done" buried inside a long message.
+    const longProgress =
+      'Starting phase 2 audit. So far I have done initial reads of paper_trader.py main loop, ' +
+      'protocol_learner.py escalate_stale_lessons, and the watchdog. Still need to finish reviewing ' +
+      'the staged-workflow EXEC handoff and confirm SIGTERM drain. No code changes yet. Will share ' +
+      'PLAN_READY in ~5 min — codex-2, please hold off on edits until then.'
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: longProgress, timestamp: '2026-03-18T11:34:20.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Ack — holding.', timestamp: '2026-03-18T11:34:30.000Z' }),
+    ]
+
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+
+    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
   })
 
   it('does NOT auto-disband when agents have no completion signal', async () => {
@@ -397,10 +432,11 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
 
   it('ignores ensemble messages when determining idle time', async () => {
     const team = makeTeam()
-    // now = 12:05:00; last NON-ensemble team msg at 12:01:35 → 205s idle > 180s
+    // now = 12:05:00; last NON-ensemble team msg at 11:54:30 → 630s idle > 600s threshold.
+    // The ensemble message at 12:04:55 must NOT count as recent activity.
     const messages: EnsembleMessage[] = [
-      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[DONE]', timestamp: '2026-03-18T12:01:30.000Z' }),
-      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still working', timestamp: '2026-03-18T12:01:35.000Z' }),
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[DONE]', timestamp: '2026-03-18T11:54:25.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still working', timestamp: '2026-03-18T11:54:30.000Z' }),
       makeMessage({ from: 'ensemble', teamId: 'team-1', content: 'Agent joined', timestamp: '2026-03-18T12:04:55.000Z' }),
     ]
 
@@ -483,7 +519,11 @@ describe('completion signal patterns', () => {
 
   function getCompletionConfidence(content: string): 'high' | 'low' | null {
     if (HIGH_CONFIDENCE.some(p => p.test(content))) return 'high'
-    if (LOW_CONFIDENCE.some(p => p.test(content))) return 'low'
+    // Mirrors services/ensemble-service.ts — low-conf only on short, tail-anchored sign-offs.
+    const trimmed = content.trim()
+    if (trimmed.length === 0 || trimmed.length > 200) return null
+    const tail = trimmed.slice(-80)
+    if (LOW_CONFIDENCE.some(p => p.test(tail))) return 'low'
     return null
   }
 
@@ -505,6 +545,16 @@ describe('completion signal patterns', () => {
     ['completion marker only', null],
     ['undone but still working', null],
     ['', null],
+    // Tail-position guard: "done" mid-message in a long progress update is NOT
+    // a sign-off. Previously this was treated as low-conf and could trip the
+    // 15-min auto-disband during real deep work.
+    [
+      'Starting phase 2. So far I have done initial reads of paper_trader.py main loop and ' +
+        'protocol_learner.escalate_stale_lessons. Still need to review the staged EXEC handoff. ' +
+        'No code changes yet — will share PLAN_READY in ~5 min.',
+      null,
+    ],
+    ['Almost done with phase 1, still wiring tests and need ~10 more min before I can hand off to codex.', null],
   ] as const)('"%s" → %s', (content: string, expected: 'high' | 'low' | null) => {
     expect(getCompletionConfidence(content)).toBe(expected)
   })

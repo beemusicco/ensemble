@@ -57,8 +57,18 @@ function parseEnvMs(name: string, fallback: number): number {
 // Primary completion path is now the explicit signal-complete endpoint
 // (scripts/team-done.sh). These pattern-based thresholds are safety nets
 // for runaway sessions and legacy integrations — generous by design.
-const SINGLE_SIGNAL_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_SINGLE_SIGNAL_IDLE_MS', 180_000)
-const LOW_CONFIDENCE_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_LOW_CONF_IDLE_MS', 900_000)
+//
+// Bumped after observing premature kills on real deep-work runs:
+// - SINGLE_SIGNAL 180s→600s: claude-1 emitting [VERIFY_DONE] for its part while
+//   codex spends 4-6 min on a multi-file edit was killing live teams. team-done
+//   is the trusted disband path; this safety net just needs to outlast a long
+//   single message-cycle.
+// - LOW_CONF 900s→1800s: word-boundary "done" / "complete" / "klaar" matches
+//   embedded in long messages were tripping after 15 min of real work. Combined
+//   with the new tail-position guard in getCompletionConfidence(), 30 min is
+//   the right ceiling for a true sign-off-without-team-done escape hatch.
+const SINGLE_SIGNAL_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_SINGLE_SIGNAL_IDLE_MS', 600_000)
+const LOW_CONFIDENCE_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_LOW_CONF_IDLE_MS', 1_800_000)
 
 const HIGH_CONFIDENCE_COMPLETION = [
   /\[DONE\]/i,
@@ -211,7 +221,16 @@ class EnsembleService {
 
   private getCompletionConfidence(content: string): 'high' | 'low' | null {
     if (HIGH_CONFIDENCE_COMPLETION.some(p => p.test(content))) return 'high'
-    if (LOW_CONFIDENCE_COMPLETION.some(p => p.test(content))) return 'low'
+    // Low-confidence words ("done", "complete", "klaar", "afgerond") are far
+    // too common in productive in-flight messages — "almost done with phase 1",
+    // "done reading paper_trader.py, now wiring tests" — to be treated as
+    // sign-offs. Real wrap-ups are SHORT and END with the keyword. Restrict
+    // matching to: trimmed message ≤200 chars AND keyword present in last 80
+    // chars. Anything else is conversational.
+    const trimmed = content.trim()
+    if (trimmed.length === 0 || trimmed.length > 200) return null
+    const tail = trimmed.slice(-80)
+    if (LOW_CONFIDENCE_COMPLETION.some(p => p.test(tail))) return 'low'
     return null
   }
 

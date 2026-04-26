@@ -230,7 +230,11 @@ echo -e "  ${CHECK} Bridge started"
 # ─── 4. Monitor ───
 MONITOR_CMD="cd '$REPO_DIR' && ./node_modules/.bin/tsx cli/monitor.ts $TEAM_ID"
 if [ -n "${TMUX:-}" ]; then
-  SPAWN_PANE="${TARGET_PANE:-$(tmux display-message -p '#{pane_id}' 2>/dev/null || echo "")}"
+  # Resolve the pane the caller is running in (where the user typed /collab).
+  # $TMUX_PANE is set per-pane by tmux — survives window switches.
+  # `tmux display-message -p` returns the session's *active* pane and lies if
+  # the user has changed windows in another tmux client.
+  SPAWN_PANE="${TARGET_PANE:-${TMUX_PANE:-$(tmux display-message -p '#{pane_id}' 2>/dev/null || echo "")}}"
   if [ -n "$SPAWN_PANE" ]; then
     tmux split-window -h -t "$SPAWN_PANE" -l '40%' "$MONITOR_CMD"
   else
