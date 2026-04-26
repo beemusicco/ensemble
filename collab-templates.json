@@ -173,6 +173,28 @@
         }
       ]
     },
+    "pentest": {
+      "name": "Penetration Test (Authorized Targets Only)",
+      "description": "Three-agent RECON → EXPLOIT → VERIFY pipeline for authorized security testing of systems you own or have written permission to test. Non-destructive proofs only.",
+      "suggestedTaskPrefix": "Pentest the following authorized target:",
+      "roles": [
+        {
+          "role": "RECON",
+          "focus": "AUTHORIZATION GATE FIRST: confirm the target is owned by the user or has explicit written test authorization. If unclear, STOP and ask. Then map the attack surface — endpoints, auth flows, version fingerprints, exposed config, third-party deps, file-upload paths, error messages that leak. NO exploits in this phase, only enumeration. Output: scoped attack plan with prioritized targets ranked by likely impact and exploit feasibility. Note any out-of-scope assets discovered (mark, do not test).",
+          "expert": "bruce-schneier"
+        },
+        {
+          "role": "EXPLOITER",
+          "focus": "Test prioritized vulnerabilities from RECON's plan against in-scope targets only. Cover OWASP Top 10 (SQLi, XSS, IDOR, broken access control, auth bypass, SSRF, deserialization, security misconfiguration, vulnerable deps), business-logic flaws, and race conditions. Each finding must include: minimal reproducible PoC, affected endpoint(s) with parameter, observed behavior vs. expected. NEVER destructive — no DROP/DELETE/rm payloads, no mass requests, no credential brute-force on real user accounts, no DoS testing. Stop at proof. If you find auth bypass or RCE, demonstrate with whoami/SELECT 1 — never escalate further. Out-of-scope hits get logged for RECON to verify, not exploited.",
+          "expert": "hd-moore"
+        },
+        {
+          "role": "VERIFIER",
+          "focus": "Validate every EXPLOITER finding in a clean environment — re-run the PoC, confirm reproduction, reject false positives explicitly. Score severity using CVSS v3 with environmental adjustment for this system's actual deployment (auth model, data sensitivity, exposure). For each confirmed finding: write a one-line root cause, the surgical fix (line refs / sanitizer / header / ACL change), the verification command the defender runs to confirm the fix worked, and a regression test recommendation. Output is a prioritized findings document the user can hand to a developer. Never sign off on Critical/High without a fix recommendation. List `targets_tested` and `out_of_scope_skipped` in the final report so scope is auditable.",
+          "expert": "katie-moussouris"
+        }
+      ]
+    },
     "thinking": {
       "name": "Thinking Mode (structured hypothesis → evidence → decision)",
       "description": "Force the team into a deliberate reasoning protocol: frame the problem with hypotheses, gather evidence for each, challenge before deciding, then act and verify. Supervisor catches unverified claims and circling. Use when correctness matters more than speed.",

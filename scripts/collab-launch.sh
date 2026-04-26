@@ -66,6 +66,14 @@ detect_template() {
   if echo "$task_lower" | grep -qE '\b(premium.quad|premium quad|critical|live.trading|production.deploy|security|irreversible)\b|\b(kritičn|produkcij|nepovratn)|\bživo[. ]+trgov'; then
     printf 'premium-quad'; return
   fi
+  # Pentest before adversarial — pentest is the more specific "authorized
+  # security testing" pipeline (RECON → EXPLOIT → VERIFY with disclosure
+  # discipline) vs. adversarial's general "stress-test what we just built".
+  # Slovenian roots: `pentest` is loanword; `ranljivost` covers ranljivosti /
+  # ranljivosti, `napad` covers napad / napadi / napadalec.
+  if echo "$task_lower" | grep -qE '\b(pentest|pen.test|penetration.test|owasp|security.test|exploit|vuln.scan|vulnerability.scan|cve.scan)\b|\b(ranljivost|napad)'; then
+    printf 'pentest'; return
+  fi
   if echo "$task_lower" | grep -qE '\b(adversarial|red.team|red team|stress.test)\b'; then
     printf 'adversarial'; return
   fi
