@@ -51,7 +51,19 @@ detect_template() {
   if echo "$task_lower" | grep -qE '\b(ultrareview|ultra.review|4.agent.review|security.review)\b'; then
     printf 'ultrareview'; return
   fi
-  if echo "$task_lower" | grep -qE '\b(premium.quad|premium quad|critical|live.trading|production.deploy)\b'; then
+  # Premium-quad: high-stakes work (production, irreversible, security-critical).
+  # Slovenian roots are matched without trailing \b because Slovenian inflects
+  # heavily — `kritično` / `kritičen` / `kritični` / `kritičnost` all share the
+  # `kritičn` stem. Same for `produkcija` / `produkcijski` / `produkcijo`,
+  # `nepovratno` / `nepovratni`. Word-leading boundary is preserved so we don't
+  # over-match inside unrelated tokens.
+  #
+  # NB: `varnost` was tested and dropped — too greedy. "varnostna kopija"
+  # (backup) and "raziskava o varnosti seje" (security research) are routine
+  # tasks that don't need the 4-agent quad. English `security` keeps the
+  # cross-language coverage; users wanting Slovenian security-critical routing
+  # should write `kritičn` or `produkcij` alongside the security concern.
+  if echo "$task_lower" | grep -qE '\b(premium.quad|premium quad|critical|live.trading|production.deploy|security|irreversible)\b|\b(kritičn|produkcij|nepovratn)|\bživo[. ]+trgov'; then
     printf 'premium-quad'; return
   fi
   if echo "$task_lower" | grep -qE '\b(adversarial|red.team|red team|stress.test)\b'; then
