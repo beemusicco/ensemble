@@ -106,6 +106,21 @@ const PROGRESS_PATTERNS = [
   /\bitem\s+\d+\s+(?:done|complete|ready|in|patched|landed)\b/i,
   /\bgate\s+(?:pass|passes|passed|passing|next|now)\b/i,
   /\b(?:starting|started)\s+(?:item|phase|work)\b/i,
+  // Round 2 coordination patterns (2026-04-27 LIBRO NAV team killed at 2.6min
+  // mid-implementation — codex-3 was emitting "[WRITING X] Starting scoped
+  // patch now" + "I'm patching exactly that audit surface" but neither phrase
+  // matched the previous regex set). Add bracketed action tags + present-
+  // continuous verbs that real implementers use during coordination.
+  /\[(?:WRITING|EDITING|PATCHING|CODING|IMPLEMENTING|FIXING|SHIPPING|REFACTORING|WIRING)\b/i,
+  /\b(?:patching|editing|wiring|refactoring|shipping|implementing|fixing)\b/i,
+  /\bscoped\s+patch\b/i,
+  /\bstart(?:ing|ed)?\s+(?:the\s+|a\s+|scoped\s+)?patch\b/i,
+  /\b(?:writing|drafting|building)\s+\w/i,
+  // Research / inspection phrases — when an agent says "opened X / Y / Z" they
+  // are reporting concrete external sources just inspected. That counts as
+  // progress in the same way "checked" / "read" do.
+  /\bopened\s+\w/i,
+  /\b(?:fetching|fetched|inspecting|inspected|loaded|loading)\s+\w/i,
 ]
 
 // Fix 6: parse class tag from message content [PLAN]/[FINDING]/etc.
@@ -315,13 +330,20 @@ export class AgentWatchdog {
 
     // D2: triangular chatter detection — if last N agent msgs cycle through 3+
     // distinct senders with no progress, force-disband. Catches A→B→C→A loops.
-    // Bumped from 9 to 12 after the 2026-04-24 company-ops collabs showed
-    // real work being killed on 3-round coordination — 12 gives 4 rounds per
-    // agent before the rule fires, matching the cadence of legitimate
-    // handoffs. Env-tunable via ENSEMBLE_TRIANGULAR_WINDOW.
+    // Bumped 9→12→18 across two passes:
+    //   12 gave 4 rounds per agent on triple-with-runner (3 agents × 4) but
+    //   only 3 rounds on premium-quad (4 agents × 3). Real premium-quad
+    //   coordination needs 4-5 rounds (architect plans, implementer asks,
+    //   adversary challenges, reviewer gates) before artifacts land.
+    //   18 gives premium-quad 4.5 rounds and triple-with-runner 6, lining up
+    //   with how teams actually behave on multi-stage tasks. Combined with
+    //   the broader PROGRESS_PATTERNS additions (bracketed action tags,
+    //   present-continuous verbs), genuine stuck loops still trip — but
+    //   "ACK I'm patching now" coordination clears the gate.
+    //   Env-tunable via ENSEMBLE_TRIANGULAR_WINDOW.
     const TRIANGULAR_WINDOW = Math.max(
       6,
-      parseInt(process.env['ENSEMBLE_TRIANGULAR_WINDOW'] ?? '', 10) || 12,
+      parseInt(process.env['ENSEMBLE_TRIANGULAR_WINDOW'] ?? '', 10) || 18,
     )
     if (agentMessages.length >= TRIANGULAR_WINDOW) {
       const tail = agentMessages.slice(-TRIANGULAR_WINDOW)
