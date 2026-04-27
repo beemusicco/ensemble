@@ -173,6 +173,28 @@
         }
       ]
     },
+    "audit-only": {
+      "name": "Audit Only (Read-Only Sweep)",
+      "description": "Three agents read and analyze without editing. Output is a structured fix-list the operator implements manually. Use when scope is large, primitives are at risk, or recovery from a bad write would be expensive.",
+      "suggestedTaskPrefix": "Read-only audit of:",
+      "roles": [
+        {
+          "role": "MAPPER",
+          "focus": "READ-ONLY MODE — no file edits, no commits, no mutating shell commands. Map the surface area: enumerate files in scope, group by concern, surface dependencies between them. Identify pain points and risks WITHOUT proposing concrete patches yet. Output: structured inventory (file, role, LOC, observed issues) for the analysts to dig into.",
+          "expert": "michael-feathers"
+        },
+        {
+          "role": "ANALYST",
+          "focus": "READ-ONLY MODE — no file edits, no commits, no mutating commands. For each item the MAPPER inventories, dig into the code and produce concrete observations: what's wrong, why it matters, what minimal change would fix it (file:line + before/after sketch — but DO NOT apply the change). Cite evidence. Group findings by severity (CRIT / HIGH / MED / LOW).",
+          "expert": "robert-c-martin"
+        },
+        {
+          "role": "REPORTER",
+          "focus": "READ-ONLY MODE — no file edits, no commits, no mutating commands. Consolidate MAPPER's inventory + ANALYST's findings into a deliverable fix-list the operator can hand off to a manual implementation pass. Format: numbered action items with file:line, severity, suggested fix sketch, and estimated edit scope. Reject any item that lacks a concrete fix sketch — the goal is actionable, not philosophical. Save the doc as docs/AUDIT_<topic>.md before team-done.",
+          "expert": "katie-moussouris"
+        }
+      ]
+    },
     "pentest": {
       "name": "Penetration Test (Authorized Targets Only)",
       "description": "Three-agent RECON → EXPLOIT → VERIFY pipeline for authorized security testing of systems you own or have written permission to test. Non-destructive proofs only.",

@@ -916,6 +916,76 @@ describe('buildPromptPreview() — injection guard + completion guidance', () =>
     })
     expect(prompt).not.toContain('CHALLENGE CULTURE')
   })
+
+  // FIX 4: rigorous + sparring modes ship the intermediate-commit discipline rule
+  it.each(['rigorous', 'sparring'] as const)(
+    '%s mode includes the intermediate-commit rule so mid-flight disband does not lose work',
+    async (mode) => {
+      const { buildPromptPreview } = await import('../services/ensemble-service')
+      const prompt = buildPromptPreview({
+        teamId: 't1', teamName: 'team-x', description: 'big refactor',
+        agentName: 'codex-1', teammateNames: ['claude-2'], agentIndex: 0,
+        challengeMode: mode,
+      })
+      expect(prompt).toContain('INTERMEDIATE COMMIT RULE')
+      expect(prompt).toContain('git add -A && git commit')
+      expect(prompt).toContain('5-10 file edits')
+    }
+  )
+  it('normal mode does NOT include the intermediate-commit rule', async () => {
+    const { buildPromptPreview } = await import('../services/ensemble-service')
+    const prompt = buildPromptPreview({
+      teamId: 't1', teamName: 'team-x', description: 'simple fix',
+      agentName: 'codex-1', teammateNames: ['claude-2'], agentIndex: 0,
+      challengeMode: 'normal',
+    })
+    expect(prompt).not.toContain('INTERMEDIATE COMMIT RULE')
+  })
+
+  // FIX 2: .collab-protect injection
+  it('injects PROTECTED FILES block when working directory has a .collab-protect file', async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'protect-'))
+    try {
+      fs.writeFileSync(path.join(tmpRoot, '.collab-protect'),
+        '# Design system primitives\n' +
+        'src/components/primitives/Card.tsx\n' +
+        'src/components/primitives/Button.tsx\n' +
+        '\n' +
+        '# generated\n' +
+        'src/generated/**\n'
+      )
+      const { buildPromptPreview } = await import('../services/ensemble-service')
+      const prompt = buildPromptPreview({
+        teamId: 't1', teamName: 'team-x', description: 'task',
+        agentName: 'codex-1', teammateNames: ['claude-2'], agentIndex: 0,
+        workingDirectory: tmpRoot,
+      })
+      expect(prompt).toContain('PROTECTED FILES — DO NOT EDIT')
+      expect(prompt).toContain('src/components/primitives/Card.tsx')
+      expect(prompt).toContain('src/components/primitives/Button.tsx')
+      expect(prompt).toContain('src/generated/**')
+      // Comments + blank lines stripped
+      expect(prompt).not.toContain('# Design system')
+      expect(prompt).toContain('emit [BLOCKER]')
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('omits PROTECTED FILES block when no .collab-protect exists', async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'no-protect-'))
+    try {
+      const { buildPromptPreview } = await import('../services/ensemble-service')
+      const prompt = buildPromptPreview({
+        teamId: 't1', teamName: 'team-x', description: 'task',
+        agentName: 'codex-1', teammateNames: ['claude-2'], agentIndex: 0,
+        workingDirectory: tmpRoot,
+      })
+      expect(prompt).not.toContain('PROTECTED FILES')
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
 })
 
 // ─────────────────────────────────────────────────────

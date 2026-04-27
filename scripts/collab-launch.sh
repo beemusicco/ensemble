@@ -55,6 +55,13 @@ detect_template() {
   if echo "$task_lower" | grep -qE '\b(ultrareview|ultra.review|4.agent.review|security.review)\b'; then
     printf 'ultrareview'; return
   fi
+  # Audit-only: read-only sweep. Triggered by explicit keyword OR by "audit"
+  # combined with a no-edit signal. Used when scope is large and a bad write
+  # would be expensive to revert (e.g. design-system primitive sweep).
+  # Slovenian: `pregled` (read), `samo.bra` (read-only), `seznam.popravkov` (fix-list).
+  if echo "$task_lower" | grep -qE '\b(audit.only|read.only.audit|read-only.sweep|fix.list|fix-list|inventory.audit)\b|\b(samo.bran|seznam.popravkov|pregled.brez)'; then
+    printf 'audit-only'; return
+  fi
   # Premium-quad: high-stakes work (production, irreversible, security-critical).
   # Slovenian roots are matched without trailing \b because Slovenian inflects
   # heavily — `kritično` / `kritičen` / `kritični` / `kritičnost` all share the

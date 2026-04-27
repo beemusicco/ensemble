@@ -477,6 +477,20 @@ function sanitizeTaskDescription(raw: string): string {
  */
 function buildChallengeBlock(mode: 'normal' | 'rigorous' | 'sparring'): string {
   if (mode === 'normal') return ''
+  // Both rigorous and sparring tail with the SAME intermediate-commit
+  // discipline rule (FIX 4 from 2026-04-27 audit). When the team is
+  // sparring/rigorous, agents are also expected to be making concrete
+  // file edits — without periodic commits, a mid-flight disband loses
+  // partial work. The rule is short and concrete so it doesn't fight the
+  // adversarial framing.
+  const intermediateCommit = [
+    `📦 INTERMEDIATE COMMIT RULE — applies whenever you edit files:`,
+    `  • After every batch of 5-10 file edits, run "git add -A && git commit -m '<batch>'"`,
+    `  • If a phase / phase-boundary closes (PLAN→EXEC, EXEC→VERIFY), commit before the boundary`,
+    `  • Mid-flight disband must never lose more than 5-10 minutes of work`,
+    `  • Commit messages should be one line, present-tense, scoped to the batch (e.g. "fix nav a11y on Account pages")`,
+  ].join('\n')
+
   if (mode === 'rigorous') {
     return [
       `🔥 CHALLENGE CULTURE: rigorous`,
@@ -488,6 +502,8 @@ function buildChallengeBlock(mode: 'normal' | 'rigorous' | 'sparring'): string {
       `If you agree, say WHY with a specific reason ("worker.ts:142 already covers this" — not "good plan").`,
       `If you disagree, propose THE alternative with reasoning.`,
       `Bias toward finding the second-order bug your teammate missed.`,
+      ``,
+      intermediateCommit,
       `---`,
     ].join('\n')
   }
@@ -504,8 +520,33 @@ function buildChallengeBlock(mode: 'normal' | 'rigorous' | 'sparring'): string {
     `Adversarial pressure is the goal — find the second-order bug, the unhandled edge case, the silent assumption. Productive disagreement > comfortable agreement.`,
     `Format your challenges as: "🔍 [agent]: [specific claim] — counter: [evidence/alternative]". Stay concrete. No vague pushback.`,
     `Final sign-off requires GO from a teammate who tried to break your work and failed.`,
+    ``,
+    intermediateCommit,
     `---`,
   ].join('\n')
+}
+
+/**
+ * Read the optional .collab-protect file at the repo root and return a list
+ * of patterns. Each non-empty, non-comment line is a glob the agent must NOT
+ * edit. Used by buildPromptPreview to inject a "PROTECTED FILES" block.
+ *
+ * Falls back to empty list if the file doesn't exist or can't be read; callers
+ * still get a working prompt, just no extra protection.
+ */
+function loadCollabProtectPatterns(workingDirectory?: string): string[] {
+  if (!workingDirectory) return []
+  try {
+    const file = path.join(workingDirectory, '.collab-protect')
+    if (!fs.existsSync(file)) return []
+    const lines = fs.readFileSync(file, 'utf-8').split('\n')
+    return lines
+      .map(l => l.trim())
+      .filter(l => l && !l.startsWith('#'))
+      .slice(0, 50) // hard cap so a runaway file can't bloat the prompt
+  } catch {
+    return []
+  }
 }
 
 export function buildPromptPreview(params: {
@@ -517,6 +558,7 @@ export function buildPromptPreview(params: {
   agentIndex: number
   templateName?: string
   challengeMode?: 'normal' | 'rigorous' | 'sparring'
+  workingDirectory?: string
 }): string {
   const template = loadCollabTemplate(params.templateName)
   const scriptsDir = path.join(__dirname, '..', 'scripts')
@@ -589,10 +631,26 @@ export function buildPromptPreview(params: {
     ?? (params.templateName && RIGOROUS_TEMPLATES.has(params.templateName) ? 'rigorous' : 'normal')
   const challengeBlock = buildChallengeBlock(effectiveChallenge)
 
+  // FIX 2: PROTECTED FILES block. Repos can ship a .collab-protect file
+  // listing globs the agents must not edit (typically: design system primitives,
+  // generated code, lockfiles, secrets). The block is mandatory — agents see
+  // the absolute prohibition before the role focus, so even rigorous/sparring
+  // pressure to "fix everything" can't drag them into editing protected paths.
+  const protectPatterns = loadCollabProtectPatterns(params.workingDirectory)
+  const protectBlock = protectPatterns.length === 0 ? '' : [
+    `🔒 PROTECTED FILES — DO NOT EDIT (read-only references only):`,
+    ...protectPatterns.map(p => `  • ${p}`),
+    `If a fix appears to require editing a protected file, STOP and emit [BLOCKER]`,
+    `with a one-line explanation of why; the operator will lift the protection`,
+    `or rescope the task. Do not work around the rule.`,
+    `---`,
+  ].join('\n')
+
   return [
     memoriesBlock,
     expertBlock,
     challengeBlock,
+    protectBlock,
     `You are ${params.agentName} in team "${params.teamName}" with teammate ${params.teammateNames.join(', ')}.`,
     `Task: ${safeDescription}`,
     ...roleInstructions,
@@ -665,14 +723,39 @@ async function createEnsembleTeamInner(
   const cwd = request.workingDirectory || process.cwd()
   const worktreeMap = new Map<string, WorktreeInfo>()
 
-  // Auto-enable worktrees when another collab is active on the same working directory
+  // Auto-enable worktrees in three cases:
+  //   1. Caller explicitly asked (request.useWorktrees=true)
+  //   2. Concurrent collab on same cwd (race risk)
+  //   3. Scope-large heuristic: task description mentions a refactor/sweep/
+  //      redesign/migration keyword OR enumerates 5+ file paths.
+  // The third case is new (FIX 1 from 2026-04-27 audit) — historically the
+  // 24-file LIBRO BACKEND POLISH task ran with worktrees=false because it
+  // was a single collab, then agents wrote in parallel to the same files
+  // and overwrote each other's edits. Now any large-scope sweep gets
+  // isolation by default; the operator can still force false via
+  // ENSEMBLE_DISABLE_AUTO_WORKTREE=1 for fast trivial edits.
   const concurrentTeams = getActiveTeamsByWorkingDir(cwd).filter(t => t.id !== team.id)
-  const useWorktrees = request.useWorktrees || concurrentTeams.length > 0
+  const desc = (team.description || '')
+  const SCOPE_LARGE_KEYWORDS = /\b(refactor|sweep|redesign|overhaul|migrat(e|ion|ing)|polish[- ]?pass|rewrite|restructur)/i
+  const fileMentions = (desc.match(/[A-Za-z0-9_/\-.]+\.(ts|tsx|js|jsx|py|sh|md|json|sql|yaml|yml|css|scss|html|svelte|vue|go|rs|kt|java|cpp|h)\b/g) || []).length
+  const isScopeLarge = SCOPE_LARGE_KEYWORDS.test(desc) || fileMentions >= 5
+  const autoWorktreeDisabled = process.env['ENSEMBLE_DISABLE_AUTO_WORKTREE'] === '1'
+  const useWorktrees = !!request.useWorktrees
+    || concurrentTeams.length > 0
+    || (isScopeLarge && !autoWorktreeDisabled)
   if (concurrentTeams.length > 0 && !request.useWorktrees) {
     appendMessage(team.id, {
       id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
       content: `⚠️ Concurrent collab detected (${concurrentTeams.length} active on same dir) — using git worktrees for isolation`,
       type: 'chat', timestamp: new Date().toISOString(),
+    })
+  } else if (isScopeLarge && !request.useWorktrees && !autoWorktreeDisabled) {
+    const reason = SCOPE_LARGE_KEYWORDS.test(desc) ? 'refactor/sweep keyword' : `${fileMentions}+ file paths in task`
+    appendMessage(team.id, {
+      id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
+      content: `🌳 Scope-large task detected (${reason}) — auto-enabling git worktrees so agents don't overwrite each other. Set ENSEMBLE_DISABLE_AUTO_WORKTREE=1 to opt out.`,
+      type: 'chat', timestamp: new Date().toISOString(),
+      meta: { event: 'auto_worktree', reason, fileMentions },
     })
   }
 
@@ -718,6 +801,7 @@ async function createEnsembleTeamInner(
       agentIndex,
       templateName: request.templateName,
       challengeMode: request.challengeMode,
+      workingDirectory: request.workingDirectory || cwd,
     })
   }
 
