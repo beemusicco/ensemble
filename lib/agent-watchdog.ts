@@ -219,7 +219,7 @@ interface AgentWatchdogDeps {
   getMessages: (teamId: string) => EnsembleMessage[]
   appendMessage: (teamId: string, message: EnsembleMessage) => void
   disbandTeam?: (teamId: string, reason: string) => Promise<void>
-  getRuntime: () => Pick<AgentRuntime, 'sendKeys' | 'pasteFromFile'>
+  getRuntime: () => Pick<AgentRuntime, 'sendKeys' | 'pasteFromFile' | 'capturePane'>
   resolveAgentProgram: (program: string) => { inputMethod: 'pasteFromFile' | 'sendKeys' }
   isSelf: (hostId?: string) => boolean
   getHostById: (hostId: string) => { url: string } | undefined
@@ -330,21 +330,18 @@ export class AgentWatchdog {
 
     // D2: triangular chatter detection — if last N agent msgs cycle through 3+
     // distinct senders with no progress, force-disband. Catches A→B→C→A loops.
-    // Bumped 9→12→18 across two passes:
-    //   12 gave 4 rounds per agent on triple-with-runner (3 agents × 4) but
-    //   only 3 rounds on premium-quad (4 agents × 3). Real premium-quad
-    //   coordination needs 4-5 rounds (architect plans, implementer asks,
-    //   adversary challenges, reviewer gates) before artifacts land.
-    //   18 gives premium-quad 4.5 rounds and triple-with-runner 6, lining up
-    //   with how teams actually behave on multi-stage tasks. Combined with
-    //   the broader PROGRESS_PATTERNS additions (bracketed action tags,
-    //   present-continuous verbs), genuine stuck loops still trip — but
-    //   "ACK I'm patching now" coordination clears the gate.
-    //   Env-tunable via ENSEMBLE_TRIANGULAR_WINDOW.
-    const TRIANGULAR_WINDOW = Math.max(
-      6,
-      parseInt(process.env['ENSEMBLE_TRIANGULAR_WINDOW'] ?? '', 10) || 18,
-    )
+    // Window scales with agent count (FIX 3):
+    //   - Triple (3 agents) gets 18 → 6 rounds per agent
+    //   - Premium-quad (4 agents) gets 18 → 4.5 rounds per agent
+    //   - 5-agent custom team gets 20 → 4 rounds per agent
+    //   - 6-agent gets 24 → 4 rounds, etc.
+    // Math: max(18, 4 * activeAgents). Each agent gets at least 4 rounds of
+    // grace, never less than the previous flat-18 default.
+    // Env override `ENSEMBLE_TRIANGULAR_WINDOW` still wins absolutely.
+    const envWindow = parseInt(process.env['ENSEMBLE_TRIANGULAR_WINDOW'] ?? '', 10)
+    const TRIANGULAR_WINDOW = Number.isFinite(envWindow) && envWindow > 0
+      ? Math.max(6, envWindow)
+      : Math.max(18, 4 * team.agents.filter(a => a.status === 'active').length)
     if (agentMessages.length >= TRIANGULAR_WINDOW) {
       const tail = agentMessages.slice(-TRIANGULAR_WINDOW)
       const uniqueSenders = new Set(tail.map(m => m.from))
@@ -514,6 +511,27 @@ export class AgentWatchdog {
         return Boolean(s?.stalledAt)
       })
       if (allStalled) {
+        // FIX 4: live-bash check. Before pulling the trigger on a team
+        // marked all-stalled, capture each agent's tmux pane and look for
+        // signs of a long-running command (no idle prompt, output flowing).
+        // Real long tests (>20 min) and large-file edits both produce this
+        // signature: the readyMarker is absent and there's recent stdout.
+        // If ANY agent shows live work, defer the disband — agents will
+        // emit team-say once the command completes.
+        const anyLiveBash = await this.anyAgentRunningLongCommand(team)
+        if (anyLiveBash) {
+          console.log(`[Watchdog] All-stalled disband DEFERRED for team ${team.id} — at least one agent has live shell output (long-running command in flight)`)
+          this.deps.appendMessage(team.id, {
+            id: uuidv4(),
+            teamId: team.id,
+            from: 'ensemble',
+            to: 'team',
+            content: `⏳ All-stalled disband deferred — at least one agent has a long-running command in flight. Waiting for it to finish.`,
+            type: 'chat',
+            timestamp: new Date(this.now()).toISOString(),
+          })
+          return
+        }
         console.warn(`[Watchdog] All ${activeAgents.length} agents stalled in team ${team.id} — force-disbanding`)
         this.deps.appendMessage(team.id, {
           id: uuidv4(),
@@ -556,6 +574,42 @@ export class AgentWatchdog {
     fs.mkdirSync(path.dirname(filePath), { recursive: true })
     fs.writeFileSync(filePath, WATCHDOG_NUDGE_TEXT)
     await runtime.pasteFromFile(sessionName, filePath)
+  }
+
+  /**
+   * FIX 4: detect agents running long-lived shell commands so we can defer
+   * the all-stalled disband. A capture-pane snapshot of the bottom of each
+   * agent's tmux session shows either:
+   *   - the CLI's idle prompt (❯ for Claude/Sonnet/Haiku, › for Codex) in
+   *     the last few lines → agent is waiting for input → really stalled
+   *   - active stdout from a running command (no prompt visible, recent
+   *     terminal output) → agent IS working, just busy
+   * If any agent shows the busy signature, defer the disband.
+   *
+   * Heuristic, not perfect — but the alternative is killing collabs that
+   * are running a 25-min test suite or large worktree merge.
+   */
+  private async anyAgentRunningLongCommand(team: EnsembleTeam): Promise<boolean> {
+    const runtime = this.deps.getRuntime()
+    if (!runtime.capturePane) return false
+    const activeAgents = team.agents.filter(a => a.status === 'active')
+    for (const agent of activeAgents) {
+      // Remote agents — we can't introspect their pane. Default-defer is too
+      // permissive (would never disband remote teams), so default to "not
+      // busy" for remote and let the local-only check decide.
+      if (agent.hostId && !this.deps.isSelf(agent.hostId)) continue
+      try {
+        const sessionName = `${team.name}-${agent.name}`
+        const tail = await runtime.capturePane(sessionName, 8)
+        // Idle markers per supported program; scan the LAST non-empty line so
+        // banners/headers in the upper viewport don't mask a busy bottom row.
+        const lines = tail.split('\n').map(l => l.trimEnd()).filter(l => l.length > 0)
+        const lastLines = lines.slice(-4).join('\n')
+        const idle = /[❯›>](?:\s|$)|\$ ?$|# ?$/.test(lastLines)
+        if (!idle) return true   // not at idle prompt → command running
+      } catch { /* capture failed → assume idle, fall through */ }
+    }
+    return false
   }
 }
 

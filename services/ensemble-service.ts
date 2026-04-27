@@ -70,13 +70,32 @@ function parseEnvMs(name: string, fallback: number): number {
 const SINGLE_SIGNAL_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_SINGLE_SIGNAL_IDLE_MS', 600_000)
 const LOW_CONFIDENCE_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_LOW_CONF_IDLE_MS', 1_800_000)
 
+// FIX 1: bracket tag must occupy a message edge to count as a sign-off. The
+// start anchor only allows whitespace before the tag (so "[DONE]" or "  [DONE]
+// my part" matches, but "as instructed emit [DONE] when ready" does not). The
+// end anchor only allows whitespace + optional terminal punctuation after the
+// tag (so "Cross-check ok [VERIFY_DONE]" or "wrapped [EXEC_DONE]." matches,
+// but "emit [DONE] when ready" does not). Together these reject bracket tags
+// that an agent quotes from its own role spec without actually sign-off.
+const HIGH_CONFIDENCE_AT_START = [
+  /^\s*\[DONE\]/i,
+  /^\s*\[COMPLETE\]/i,
+  /^\s*\[FINISHED\]/i,
+  /^\s*\[EXEC_DONE\]/i,
+  /^\s*\[VERIFY_DONE\]/i,
+]
+const HIGH_CONFIDENCE_AT_END = [
+  /\[DONE\]\s*[.!,:]?\s*$/i,
+  /\[COMPLETE\]\s*[.!,:]?\s*$/i,
+  /\[FINISHED\]\s*[.!,:]?\s*$/i,
+  /\[EXEC_DONE\]\s*[.!,:]?\s*$/i,
+  /\[VERIFY_DONE\]\s*[.!,:]?\s*$/i,
+]
+// Combined for legacy callers / tests that want a generic bracket presence.
 const HIGH_CONFIDENCE_COMPLETION = [
   /\[DONE\]/i,
   /\[COMPLETE\]/i,
   /\[FINISHED\]/i,
-  // Staged-workflow phase markers — agents emit these when staged EXEC/VERIFY
-  // phases finish. Without them, even a clean staged run waits the full
-  // 5-minute LOW_CONFIDENCE idle tax before auto-disband fires.
   /\[EXEC_DONE\]/i,
   /\[VERIFY_DONE\]/i,
 ]
@@ -205,22 +224,61 @@ class EnsembleService {
 
     const highConfSignals = completionSignals.filter(s => s.confidence === 'high')
     if (this.hasTwoRecentCompletionSignals(highConfSignals)) return true
-    if (highConfSignals.length >= 1 && idleForMs > SINGLE_SIGNAL_IDLE_THRESHOLD_MS) return true
+
+    // FIX 2: single-signal disband requires majority of active agents to have
+    // signaled, not just ANY one. Previously, claude-1 emitting [VERIFY_DONE]
+    // for its slice (architecture review) + 10 min idle on the others would
+    // disband a 4-agent team while sonnet-2 was still mid-implementation. Now
+    // a 4-agent quad needs 2+ distinct agents to have signaled before the idle
+    // path kicks in; a 3-agent triple needs 2+; a 2-agent pair still 1 (since
+    // ceil(2/2)=1, the existing 2-agent behavior is preserved).
+    const signaledAgentNames = new Set(highConfSignals.map(s => s.agentName))
+    const requiredSignalers = Math.max(1, Math.ceil(activeAgents.length / 2))
+    if (signaledAgentNames.size >= requiredSignalers && idleForMs > SINGLE_SIGNAL_IDLE_THRESHOLD_MS) {
+      return true
+    }
 
     if (idleForMs <= LOW_CONFIDENCE_IDLE_THRESHOLD_MS) return false
     return completionSignals.length >= 1
   }
 
   private getCompletionConfidence(content: string): 'high' | 'low' | null {
-    if (HIGH_CONFIDENCE_COMPLETION.some(p => p.test(content))) return 'high'
+    const trimmed = content.trim()
+    if (trimmed.length === 0) return null
+
+    // FIX 1: high-conf bracket tags only count as a real sign-off when they
+    // occupy a message EDGE — at the very start (only whitespace before) or
+    // very end (only whitespace + optional terminal punctuation after) — AND
+    // the message is reasonably short (≤300 chars). Real sign-offs:
+    //   "[DONE]"                          (start)
+    //   "[VERIFY_DONE] approved"          (start)
+    //   "Cross-check ok [VERIFY_DONE]"    (end)
+    //   "Implementation wrapped [EXEC_DONE]"  (end)
+    // False positives (now correctly rejected):
+    //   "as instructed I will emit [DONE] when ready"
+    //   "Don't emit [DONE] in text; it is no longer auto-detected"
+    //   "The instructions say to emit [EXEC_DONE] when the patch lands"
+    if (trimmed.length <= 300) {
+      const matchesEdge =
+        HIGH_CONFIDENCE_AT_START.some(p => p.test(trimmed)) ||
+        HIGH_CONFIDENCE_AT_END.some(p => p.test(trimmed))
+      if (matchesEdge) return 'high'
+    }
+    // Anything longer than 300 chars OR with the tag buried mid-prose is
+    // treated as discussion, not a sign-off.
+    if (HIGH_CONFIDENCE_COMPLETION.some(p => p.test(trimmed))) {
+      // Buried — explicitly drop to null (not low) so it doesn't accidentally
+      // match low-conf patterns and creep back into idle-tax disband.
+      return null
+    }
+
     // Low-confidence words ("done", "complete", "klaar", "afgerond") are far
     // too common in productive in-flight messages — "almost done with phase 1",
     // "done reading paper_trader.py, now wiring tests" — to be treated as
     // sign-offs. Real wrap-ups are SHORT and END with the keyword. Restrict
     // matching to: trimmed message ≤200 chars AND keyword present in last 80
     // chars. Anything else is conversational.
-    const trimmed = content.trim()
-    if (trimmed.length === 0 || trimmed.length > 200) return null
+    if (trimmed.length > 200) return null
     const tail = trimmed.slice(-80)
     if (LOW_CONFIDENCE_COMPLETION.some(p => p.test(tail))) return 'low'
     return null

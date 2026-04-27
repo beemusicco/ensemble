@@ -335,6 +335,54 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(false)
   })
 
+  // FIX 2: majority-required signal disband. A 4-agent premium-quad team with
+  // ONE agent's [VERIFY_DONE] + 10+ minutes of silence used to disband; now it
+  // requires ceil(4/2)=2 distinct signalers before the idle path triggers.
+  it('does NOT auto-disband a 4-agent team on ONE single-agent high-conf signal even past 600s idle', async () => {
+    const team = makeTeam({
+      agents: [
+        { agentId: 'a1', name: 'claude-1',  program: 'claude',     role: 'lead',   hostId: 'local', status: 'active' },
+        { agentId: 'a2', name: 'sonnet-2',  program: 'sonnet',     role: 'member', hostId: 'local', status: 'active' },
+        { agentId: 'a3', name: 'codex-3',   program: 'codex',      role: 'member', hostId: 'local', status: 'active' },
+        { agentId: 'a4', name: 'codex-4',   program: 'codex-mini', role: 'member', hostId: 'local', status: 'active' },
+      ],
+    })
+    // 700s idle, only ONE agent emitted [VERIFY_DONE]. Old behavior: disband.
+    // New behavior: needs ≥2 distinct agents, so still active.
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'claude-1', teamId: 'team-1', content: '[VERIFY_DONE] architecture review', timestamp: '2026-03-18T11:53:00.000Z' }),
+      makeMessage({ from: 'sonnet-2', teamId: 'team-1', content: 'Mid-implementation, ~10 more min', timestamp: '2026-03-18T11:53:20.000Z' }),
+    ]
+
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(false)
+  })
+
+  it('auto-disbands a 4-agent team once the majority (2+) of agents have signaled high-conf + idle', async () => {
+    const team = makeTeam({
+      agents: [
+        { agentId: 'a1', name: 'claude-1',  program: 'claude',     role: 'lead',   hostId: 'local', status: 'active' },
+        { agentId: 'a2', name: 'sonnet-2',  program: 'sonnet',     role: 'member', hostId: 'local', status: 'active' },
+        { agentId: 'a3', name: 'codex-3',   program: 'codex',      role: 'member', hostId: 'local', status: 'active' },
+        { agentId: 'a4', name: 'codex-4',   program: 'codex-mini', role: 'member', hostId: 'local', status: 'active' },
+      ],
+    })
+    // 700s idle, TWO different agents emitted high-conf signals (but more
+    // than 60s apart, so the two-signal-window rule does NOT fire — only the
+    // majority+idle rule should). Both edge-positioned for FIX 1 to recognize.
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'claude-1', teamId: 'team-1', content: '[VERIFY_DONE] architecture review', timestamp: '2026-03-18T11:51:30.000Z' }),
+      makeMessage({ from: 'sonnet-2', teamId: 'team-1', content: '[EXEC_DONE] landing fixes shipped', timestamp: '2026-03-18T11:53:30.000Z' }),
+    ]
+
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(true)
+  })
+
   it('auto-disbands on low-confidence signals after extended idle (default 30min)', async () => {
     const team = makeTeam()
     // now = 12:05:00; last team msg at 11:34:30 → 1830s idle > 1800s threshold
@@ -508,6 +556,8 @@ describe('completion signal patterns', () => {
     /\[DONE\]/i,
     /\[COMPLETE\]/i,
     /\[FINISHED\]/i,
+    /\[EXEC_DONE\]/i,
+    /\[VERIFY_DONE\]/i,
   ]
   const LOW_CONFIDENCE = [
     /(?:^|[^\p{L}\p{N}_])afgerond(?:[^\p{L}\p{N}_]|$)/iu,
@@ -517,11 +567,19 @@ describe('completion signal patterns', () => {
     /(?:^|\s)tot de volgende(?:\s|$)/i,
   ]
 
+  // Mirrors services/ensemble-service.ts edge anchors.
+  const HIGH_AT_START = [/^\s*\[DONE\]/i, /^\s*\[COMPLETE\]/i, /^\s*\[FINISHED\]/i, /^\s*\[EXEC_DONE\]/i, /^\s*\[VERIFY_DONE\]/i]
+  const HIGH_AT_END = [/\[DONE\]\s*[.!,:]?\s*$/i, /\[COMPLETE\]\s*[.!,:]?\s*$/i, /\[FINISHED\]\s*[.!,:]?\s*$/i, /\[EXEC_DONE\]\s*[.!,:]?\s*$/i, /\[VERIFY_DONE\]\s*[.!,:]?\s*$/i]
+
   function getCompletionConfidence(content: string): 'high' | 'low' | null {
-    if (HIGH_CONFIDENCE.some(p => p.test(content))) return 'high'
-    // Mirrors services/ensemble-service.ts — low-conf only on short, tail-anchored sign-offs.
     const trimmed = content.trim()
-    if (trimmed.length === 0 || trimmed.length > 200) return null
+    if (trimmed.length === 0) return null
+    if (trimmed.length <= 300) {
+      if (HIGH_AT_START.some(p => p.test(trimmed))) return 'high'
+      if (HIGH_AT_END.some(p => p.test(trimmed))) return 'high'
+    }
+    if (HIGH_CONFIDENCE.some(p => p.test(trimmed))) return null  // buried mid-prose
+    if (trimmed.length > 200) return null
     const tail = trimmed.slice(-80)
     if (LOW_CONFIDENCE.some(p => p.test(tail))) return 'low'
     return null
@@ -555,6 +613,28 @@ describe('completion signal patterns', () => {
       null,
     ],
     ['Almost done with phase 1, still wiring tests and need ~10 more min before I can hand off to codex.', null],
+    // FIX 1: bracket tags buried mid-prose (e.g. agent quoting its own role
+    // instructions) must NOT register as high-confidence. Real sign-offs are
+    // short and put the tag at an edge.
+    [
+      'as instructed I will emit [DONE] when the implementation is complete. For now, ' +
+        'I am still drafting the architecture plan and will share PLAN_READY in ~3 min.',
+      null,
+    ],
+    [
+      'Reminder from the role spec: do not emit [VERIFY_DONE] in text; it is no longer ' +
+        'auto-detected. Running team-done is the only reliable way to close.',
+      null,
+    ],
+    [
+      'The instructions say to emit [EXEC_DONE] when the patch lands and tests pass. ' +
+        'Currently mid-implementation, will signal once codex-2 confirms the diff.',
+      null,
+    ],
+    // High-conf still works for real edge-position sign-offs:
+    ['[VERIFY_DONE] approved', 'high'],
+    ['Cross-check ok [VERIFY_DONE]', 'high'],
+    ['[DONE] my part — handing off to sonnet-2', 'high'],
   ] as const)('"%s" → %s', (content: string, expected: 'high' | 'low' | null) => {
     expect(getCompletionConfidence(content)).toBe(expected)
   })

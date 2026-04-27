@@ -83,7 +83,7 @@ describe('AgentWatchdog', () => {
       loadTeams: () => teams,
       getMessages: () => messages,
       appendMessage: (_teamId, message) => appended.push(message),
-      getRuntime: () => ({ sendKeys, pasteFromFile }),
+      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: vi.fn(async () => '$ ') }),
       resolveAgentProgram: () => ({ inputMethod: 'sendKeys' }),
       isSelf: () => true,
       getHostById: () => undefined,
@@ -190,7 +190,7 @@ describe('AgentWatchdog', () => {
       getMessages: () => messages,
       appendMessage: (_teamId, message) => appended.push(message),
       disbandTeam,
-      getRuntime: () => ({ sendKeys, pasteFromFile }),
+      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: vi.fn(async () => '$ ') }),
       resolveAgentProgram: () => ({ inputMethod: 'sendKeys' }),
       isSelf: () => true,
       getHostById: () => undefined,
@@ -220,5 +220,114 @@ describe('AgentWatchdog', () => {
 
     expect(getWatchdogNudgeMs()).toBe(1234)
     expect(getWatchdogStallMs()).toBe(5678)
+  })
+
+  // FIX 4: live-bash detection defers all-stalled disband when an agent's
+  // tmux pane shows running output instead of the idle prompt. Real case:
+  // 25-min test suite or large worktree merge — we don't want to kill the
+  // team while it's just waiting for a long command.
+  it('defers all-stalled disband when capturePane shows a long-running command on at least one agent', async () => {
+    const disbandTeam = vi.fn(async () => {})
+    teams = [makeTeam({
+      agents: [
+        { agentId: 'agent-1', name: 'codex-1', program: 'codex', role: 'lead', hostId: 'local', status: 'active' },
+        { agentId: 'agent-2', name: 'claude-2', program: 'claude', role: 'worker', hostId: 'local', status: 'active' },
+      ],
+    })]
+    messages = [
+      makeMessage({ id: 'm1', from: 'codex-1', timestamp: '2026-03-19T10:00:00.000Z' }),
+      makeMessage({ id: 'm2', from: 'claude-2', timestamp: '2026-03-19T10:00:00.000Z' }),
+    ]
+
+    // claude-2 idle prompt visible (❯), codex-2 in middle of test output (no prompt)
+    const captureMock = vi.fn(async (session: string) => {
+      if (session.includes('codex-1')) {
+        return [
+          'PASS  tests/integration/db.test.ts  (4.2s)',
+          'PASS  tests/integration/queue.test.ts  (5.1s)',
+          'Test Suites: 12 of 24 |',
+          'Time: 142.3s',  // last line, no idle prompt
+        ].join('\n')
+      }
+      return 'some banner\n❯ '  // claude-2 at idle
+    })
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const watchdog = new AgentWatchdog({
+      loadTeams: () => teams,
+      getMessages: () => messages,
+      appendMessage: (_teamId, message) => appended.push(message),
+      disbandTeam,
+      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: captureMock }),
+      resolveAgentProgram: () => ({ inputMethod: 'sendKeys' }),
+      isSelf: () => true,
+      getHostById: () => undefined,
+      postRemoteSessionCommand,
+      collabDeliveryFile: (teamId, sessionName) => `/tmp/${teamId}/${sessionName}.txt`,
+      now: () => nowMs,
+      pollIntervalMs: 60_000,
+      nudgeAfterMs: 90_000,
+      stallAfterMs: 180_000,
+    })
+
+    await watchdog.poll()
+    nowMs += 91_000
+    await watchdog.poll()         // nudge both
+    nowMs += 181_000
+    await watchdog.poll()         // both stalled → would disband, but captureMock says codex-1 busy
+
+    // Disband should be DEFERRED, not called
+    expect(disbandTeam).not.toHaveBeenCalled()
+    expect(appended.some(m => m.content.includes('All-stalled disband deferred'))).toBe(true)
+    watchdog.stop()
+    warnSpy.mockRestore()
+    logSpy.mockRestore()
+  })
+
+  it('proceeds with all-stalled disband when capturePane shows idle prompt on every agent', async () => {
+    const disbandTeam = vi.fn(async () => {})
+    teams = [makeTeam({
+      agents: [
+        { agentId: 'agent-1', name: 'codex-1', program: 'codex', role: 'lead', hostId: 'local', status: 'active' },
+        { agentId: 'agent-2', name: 'claude-2', program: 'claude', role: 'worker', hostId: 'local', status: 'active' },
+      ],
+    })]
+    messages = [
+      makeMessage({ id: 'm1', from: 'codex-1', timestamp: '2026-03-19T10:00:00.000Z' }),
+      makeMessage({ id: 'm2', from: 'claude-2', timestamp: '2026-03-19T10:00:00.000Z' }),
+    ]
+
+    // Both panes show their CLI's idle prompt
+    const captureMock = vi.fn(async (session: string) =>
+      session.includes('codex-1') ? 'banner\n› ' : 'banner\n❯ ')
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const watchdog = new AgentWatchdog({
+      loadTeams: () => teams,
+      getMessages: () => messages,
+      appendMessage: (_teamId, message) => appended.push(message),
+      disbandTeam,
+      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: captureMock }),
+      resolveAgentProgram: () => ({ inputMethod: 'sendKeys' }),
+      isSelf: () => true,
+      getHostById: () => undefined,
+      postRemoteSessionCommand,
+      collabDeliveryFile: (teamId, sessionName) => `/tmp/${teamId}/${sessionName}.txt`,
+      now: () => nowMs,
+      pollIntervalMs: 60_000,
+      nudgeAfterMs: 90_000,
+      stallAfterMs: 180_000,
+    })
+
+    await watchdog.poll()
+    nowMs += 91_000
+    await watchdog.poll()
+    nowMs += 181_000
+    await watchdog.poll()
+
+    expect(disbandTeam).toHaveBeenCalledWith('team-1', 'all agents stalled')
+    watchdog.stop()
+    warnSpy.mockRestore()
   })
 })
