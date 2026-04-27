@@ -869,6 +869,53 @@ describe('buildPromptPreview() — injection guard + completion guidance', () =>
     expect(taskSection).not.toMatch(/\[VERIFY_DONE\]/)
     expect(taskSection).not.toMatch(/\[PROGRESS\]/)
   })
+
+  // CHALLENGE CULTURE — verify mode injection works end-to-end.
+  it('omits the challenge block when challengeMode is normal (default)', async () => {
+    const { buildPromptPreview } = await import('../services/ensemble-service')
+    const prompt = buildPromptPreview({
+      teamId: 't1', teamName: 'team-x', description: 'normal task',
+      agentName: 'codex-1', teammateNames: ['claude-2'], agentIndex: 0,
+    })
+    expect(prompt).not.toContain('CHALLENGE CULTURE')
+  })
+
+  it('injects RIGOROUS challenge block for premium-quad / pentest / debug templates by default', async () => {
+    const { buildPromptPreview } = await import('../services/ensemble-service')
+    for (const tmpl of ['premium-quad', 'pentest', 'debug', 'adversarial']) {
+      const prompt = buildPromptPreview({
+        teamId: 't1', teamName: 'team-x', description: 'auto-rigorous task',
+        agentName: 'codex-1', teammateNames: ['claude-2'], agentIndex: 0,
+        templateName: tmpl,
+      })
+      expect(prompt, `template=${tmpl}`).toContain('CHALLENGE CULTURE: rigorous')
+      expect(prompt).toContain('Polite-ack is weak')
+    }
+  })
+
+  it('explicit challengeMode overrides the template default — sparring on premium-quad', async () => {
+    const { buildPromptPreview } = await import('../services/ensemble-service')
+    const prompt = buildPromptPreview({
+      teamId: 't1', teamName: 'team-x', description: 'high-heat task',
+      agentName: 'codex-1', teammateNames: ['claude-2'], agentIndex: 0,
+      templateName: 'premium-quad',
+      challengeMode: 'sparring',
+    })
+    expect(prompt).toContain('CHALLENGE CULTURE: sparring')
+    expect(prompt).toContain('Polite-acks are BANNED')
+    expect(prompt).not.toContain('CHALLENGE CULTURE: rigorous')
+  })
+
+  it('explicit challengeMode=normal downgrades a rigorous-by-default template', async () => {
+    const { buildPromptPreview } = await import('../services/ensemble-service')
+    const prompt = buildPromptPreview({
+      teamId: 't1', teamName: 'team-x', description: 'critical but quiet',
+      agentName: 'codex-1', teammateNames: ['claude-2'], agentIndex: 0,
+      templateName: 'premium-quad',
+      challengeMode: 'normal',
+    })
+    expect(prompt).not.toContain('CHALLENGE CULTURE')
+  })
 })
 
 // ─────────────────────────────────────────────────────

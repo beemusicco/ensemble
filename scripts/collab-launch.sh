@@ -94,6 +94,28 @@ detect_template() {
 }
 TEMPLATE_NAME="$(detect_template "$TASK")"
 
+# Challenge mode auto-pick. Order:
+#   1. ENSEMBLE_CHALLENGE_MODE env wins absolutely
+#   2. Explicit keyword in task: sparring|podjebavanje|nemiri|adversarial.heat → sparring
+#   3. Rigorous-by-default templates: premium-quad/ultrareview/pentest/adversarial/crypto-strategy/debug
+#   4. Default: normal
+detect_challenge_mode() {
+  local task_lower
+  task_lower=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  if [ -n "${ENSEMBLE_CHALLENGE_MODE:-}" ]; then
+    printf '%s' "$ENSEMBLE_CHALLENGE_MODE"; return
+  fi
+  if echo "$task_lower" | grep -qE '\b(sparring|adversarial.heat|high.heat)\b|\b(podjebavanj|nemir)'; then
+    printf 'sparring'; return
+  fi
+  case "$2" in
+    premium-quad|ultrareview|pentest|adversarial|crypto-strategy|debug)
+      printf 'rigorous'; return ;;
+  esac
+  printf 'normal'
+}
+CHALLENGE_MODE="$(detect_challenge_mode "$TASK" "$TEMPLATE_NAME")"
+
 # ─── Colors ───
 G='\033[92m'; C='\033[96m'; D='\033[2m'; W='\033[97m'; BD='\033[1m'; R='\033[0m'
 CHECK="${G}✓${R}"
@@ -147,7 +169,7 @@ fi
 # ─── 2. Create team (use env vars to avoid quoting hell) ───
 TEAM_NAME="collab-$(python3 -c 'import random,time; print(str(time.time_ns()//1000000)+"-"+str(random.randint(1000,9999)))')"
 PAYLOAD_FILE=$(mktemp)
-TNAME="$TEAM_NAME" TDESC="$TASK" TCWD="$CWD" THOST="$HOST_ID" TAGENTS="$AGENTS" TTEMPLATE="$TEMPLATE_NAME" PFILE="$PAYLOAD_FILE" python3 -c "
+TNAME="$TEAM_NAME" TDESC="$TASK" TCWD="$CWD" THOST="$HOST_ID" TAGENTS="$AGENTS" TTEMPLATE="$TEMPLATE_NAME" TCHALLENGE="$CHALLENGE_MODE" PFILE="$PAYLOAD_FILE" python3 -c "
 import json, os
 agents_str = os.environ.get('TAGENTS', '')
 if agents_str:
@@ -182,9 +204,13 @@ if staged:
 tmpl = os.environ.get('TTEMPLATE', '').strip()
 if tmpl:
     payload['templateName'] = tmpl
+challenge = os.environ.get('TCHALLENGE', '').strip()
+if challenge and challenge in ('normal', 'rigorous', 'sparring'):
+    payload['challengeMode'] = challenge
 json.dump(payload, open(os.environ['PFILE'], 'w'))
 "
 [ -n "$TEMPLATE_NAME" ] && echo -e "  ${D}Template: ${TEMPLATE_NAME}${R}"
+[ -n "$CHALLENGE_MODE" ] && [ "$CHALLENGE_MODE" != "normal" ] && echo -e "  ${D}Challenge mode: ${CHALLENGE_MODE}${R}"
 RESULT=$(curl -sf -X POST "$API/api/ensemble/teams" \
   -H "Content-Type: application/json" \
   -H "$AUTH_HDR" \

@@ -73,7 +73,18 @@ export interface CreateTeamRequest {
   useWorktrees?: boolean
   staged?: boolean
   stagedConfig?: StagedWorkflowConfig
+  challengeMode?: ChallengeMode
 }
+
+/**
+ * How aggressively agents challenge each other in the team feed.
+ * - normal:    constructive evidence-based discussion (default)
+ * - rigorous:  every claim demands evidence; polite-acks discouraged
+ * - sparring:  full adversarial — polite-acks BANNED, every message must
+ *              add evidence, propose a counter, find a flaw, or ship an
+ *              artifact. Use for high-stakes / security / debug work.
+ */
+export type ChallengeMode = 'normal' | 'rigorous' | 'sparring'
 
 export type StagedPhase = 'plan' | 'exec' | 'verify'
 

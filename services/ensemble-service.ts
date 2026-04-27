@@ -466,6 +466,48 @@ function sanitizeTaskDescription(raw: string): string {
   )
 }
 
+/**
+ * Per-mode "challenge culture" block. Inserted before the role section so
+ * everything below it operates under that tone. The blocks are deliberately
+ * SHORT — one paragraph, four bullet rules — so they don't bloat the prompt
+ * or fight the role focus. The patterns ensure that productive challenge
+ * messages match watchdog PROGRESS_PATTERNS (file:line citations, command
+ * output, concrete counter-proposals), so dialing this up doesn't trip
+ * triangular-chatter detection.
+ */
+function buildChallengeBlock(mode: 'normal' | 'rigorous' | 'sparring'): string {
+  if (mode === 'normal') return ''
+  if (mode === 'rigorous') {
+    return [
+      `🔥 CHALLENGE CULTURE: rigorous`,
+      `Polite-ack is weak. Every team-say message must do one of:`,
+      `  ✓ Add evidence (file:line, command output, test result, citation)`,
+      `  ✓ Disagree with a concrete counter-proposal`,
+      `  ✓ Find a flaw in the teammate's claim and propose a fix`,
+      `  ✓ Ship a concrete artifact (file edit, diff, command run)`,
+      `If you agree, say WHY with a specific reason ("worker.ts:142 already covers this" — not "good plan").`,
+      `If you disagree, propose THE alternative with reasoning.`,
+      `Bias toward finding the second-order bug your teammate missed.`,
+      `---`,
+    ].join('\n')
+  }
+  // sparring
+  return [
+    `🌶️ CHALLENGE CULTURE: sparring (high heat)`,
+    `Polite-acks are BANNED. "Acknowledged. Standing by." is not a message — do not send it.`,
+    `Every message must do at least one:`,
+    `  • Cite hard evidence (file:line, exit code, command output, test name + result, version, hash)`,
+    `  • Propose a SPECIFIC counter (replace X with Y at file:line, with reason)`,
+    `  • Surface a flaw the teammate missed and PATCH it`,
+    `  • Ship a real artifact (committed diff, applied edit, executed command with output)`,
+    `Treat every claim from a teammate as a hypothesis until they prove it. "Looks good" without evidence = ask for the file:line. "Should work" without test = ask for the test command.`,
+    `Adversarial pressure is the goal — find the second-order bug, the unhandled edge case, the silent assumption. Productive disagreement > comfortable agreement.`,
+    `Format your challenges as: "🔍 [agent]: [specific claim] — counter: [evidence/alternative]". Stay concrete. No vague pushback.`,
+    `Final sign-off requires GO from a teammate who tried to break your work and failed.`,
+    `---`,
+  ].join('\n')
+}
+
 export function buildPromptPreview(params: {
   teamId: string
   teamName: string
@@ -474,6 +516,7 @@ export function buildPromptPreview(params: {
   teammateNames: string[]
   agentIndex: number
   templateName?: string
+  challengeMode?: 'normal' | 'rigorous' | 'sparring'
 }): string {
   const template = loadCollabTemplate(params.templateName)
   const scriptsDir = path.join(__dirname, '..', 'scripts')
@@ -535,9 +578,21 @@ export function buildPromptPreview(params: {
     ? `EXPERT MENTAL MODEL (${expertSlug}):\n${expertBody}\n---\nAdopt this expert's frameworks, questions, and operating beliefs while executing the role below.\n`
     : ''
 
+  // Auto-pick challenge mode from the template if the caller didn't override.
+  // Templates that are inherently adversarial / high-stakes get rigorous by
+  // default; everything else stays normal. Explicit `params.challengeMode`
+  // wins absolutely (caller can downgrade premium-quad to normal, or upgrade
+  // anything to sparring).
+  const RIGOROUS_TEMPLATES = new Set(['premium-quad', 'ultrareview', 'pentest', 'adversarial', 'crypto-strategy', 'debug'])
+  const effectiveChallenge: 'normal' | 'rigorous' | 'sparring' =
+    params.challengeMode
+    ?? (params.templateName && RIGOROUS_TEMPLATES.has(params.templateName) ? 'rigorous' : 'normal')
+  const challengeBlock = buildChallengeBlock(effectiveChallenge)
+
   return [
     memoriesBlock,
     expertBlock,
+    challengeBlock,
     `You are ${params.agentName} in team "${params.teamName}" with teammate ${params.teammateNames.join(', ')}.`,
     `Task: ${safeDescription}`,
     ...roleInstructions,
@@ -662,6 +717,7 @@ async function createEnsembleTeamInner(
       teammateNames: otherNames,
       agentIndex,
       templateName: request.templateName,
+      challengeMode: request.challengeMode,
     })
   }
 
