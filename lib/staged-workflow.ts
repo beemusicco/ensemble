@@ -17,6 +17,28 @@ const DEFAULT_PLAN_TIMEOUT_MS = 120_000
 const DEFAULT_EXEC_TIMEOUT_MS = 300_000
 const DEFAULT_VERIFY_TIMEOUT_MS = 120_000
 const DEFAULT_POLL_INTERVAL_MS = 5_000
+const DEFAULT_MAX_FIX_ITERATIONS = 2
+
+// VERIFY-phase NO-GO detection. When agents complete VERIFY but flag the
+// implementation as not approved (gate failed, blockers identified), we want
+// to loop back into EXEC with the blockers list so the team self-resolves
+// instead of stalling in a polite-ack loop until watchdog kills it.
+//
+// Patterns are deliberately strict — only count a NO-GO when the message
+// uses the formal verdict language ("NO-GO", "NOT APPROVED", "verify failed").
+// Casual mentions of "blocker" or "fail" mid-prose don't trigger the loop.
+const NO_GO_PATTERNS = [
+  /\bNO[-_ ]GO\b/i,
+  /\bNOT[-_ ]APPROVED\b/i,
+  /\bverify[: ]+failed\b/i,
+  /\bgate[: ]+(failed|fail|reject(ed)?)\b/i,
+  /\b(verify|review)[: ]+(reject(ed)?|denied)\b/i,
+  /\[NO[-_ ]GO\]/i,
+  /\[REJECTED\]/i,
+]
+function hasNoGoMarker(content: string): boolean {
+  return NO_GO_PATTERNS.some(p => p.test(content))
+}
 
 const PLAN_HIGH_CONFIDENCE = /\[PLAN_READY\]/
 const EXEC_HIGH_CONFIDENCE = /\[EXEC_DONE\]/
@@ -81,6 +103,7 @@ function resolveConfig(config?: StagedWorkflowConfig): Required<StagedWorkflowCo
     execTimeoutMs: config?.execTimeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS,
     verifyTimeoutMs: config?.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
     pollIntervalMs: config?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+    maxFixIterations: config?.maxFixIterations ?? DEFAULT_MAX_FIX_ITERATIONS,
   }
 }
 
@@ -196,7 +219,7 @@ export class StagedWorkflowManager {
     this.resetCursor()
 
     this.log('verify', 'Starting VERIFY phase — agents review each other\'s work')
-    const verifyStartedAt = this.now().toISOString()
+    let verifyStartedAt = this.now().toISOString()
     await this.deliverPhasePrompts('verify', this.agents.map((agent, index) => async () => {
       if (slowExecAgents.includes(agent.name)) {
         const teammates = this.agentNames().filter(name => name !== agent.name)
@@ -222,6 +245,111 @@ export class StagedWorkflowManager {
           : `VERIFY phase window elapsed after ${Math.round(this.config.verifyTimeoutMs / 1000)}s`,
       )
     }
+
+    // Auto-fix loop: when VERIFY concludes NO-GO, re-run EXEC + VERIFY with
+    // the blockers list so the team self-resolves instead of stalling in a
+    // polite-ack loop until watchdog kills it. Bounded to maxFixIterations.
+    for (let iter = 1; iter <= this.config.maxFixIterations; iter++) {
+      const verifyMessages = this.collectAgentMessagesSince(verifyStartedAt)
+      const noGoSignals = verifyMessages.filter(m => hasNoGoMarker(m.content))
+      if (noGoSignals.length === 0) break  // verified clean — exit cleanly
+
+      const blockersBlock = this.summarizeBlockers(verifyMessages)
+      this.log(
+        'exec',
+        `🔧 VERIFY concluded NO-GO (${noGoSignals.length} signal${noGoSignals.length === 1 ? '' : 's'} from ${[...new Set(noGoSignals.map(m => m.from))].join(', ')}) — entering FIX iteration ${iter}/${this.config.maxFixIterations}`,
+      )
+
+      this.resetCursor()
+      const fixExecStartedAt = this.now().toISOString()
+      await this.deliverPhasePrompts('exec', this.agents.map((agent, index) => async () => {
+        const teammates = this.agentNames().filter(name => name !== agent.name)
+        const base = (this.options.buildExecPrompt || defaultExecPrompt)({ agent, teammates, index })
+        await this.deliverToAgent(
+          agent,
+          `🔧 FIX iteration ${iter}/${this.config.maxFixIterations} — VERIFY found blockers. Address them now, then emit [EXEC_DONE].\n\n` +
+          `BLOCKERS FROM VERIFY:\n${blockersBlock}\n\n${base}`,
+        )
+      }))
+      await this.waitForConditionOrTimeout(
+        () => this.agentsCompletedExec(fixExecStartedAt),
+        this.config.execTimeoutMs,
+        () => this.agentsCompletedExecLowConfidence(fixExecStartedAt),
+      )
+
+      this.resetCursor()
+      verifyStartedAt = this.now().toISOString()
+      this.log('verify', `Re-running VERIFY after FIX iteration ${iter}/${this.config.maxFixIterations}`)
+      await this.deliverPhasePrompts('verify', this.agents.map((agent, index) => async () => {
+        const teammates = this.agentNames().filter(name => name !== agent.name)
+        const base = (this.options.buildVerifyPrompt || defaultVerifyPrompt)({
+          agent, teammates, teammateToReview: teammates[0], index,
+        })
+        await this.deliverToAgent(
+          agent,
+          `🔁 RE-VERIFY ${iter}/${this.config.maxFixIterations} — confirm the fix landed. Emit [VERIFY_DONE] with explicit GO or NO-GO verdict.\n\n${base}`,
+        )
+      }))
+      if (this.config.verifyTimeoutMs > 0) {
+        await this.waitForConditionOrTimeout(
+          () => this.agentsCompletedVerify(verifyStartedAt),
+          this.config.verifyTimeoutMs,
+        )
+      }
+    }
+
+    // After the loop, if STILL NO-GO post the final escalation marker so the
+    // user / external observer sees that the team exhausted its auto-fix
+    // budget without converging. We do not disband here — let the normal
+    // signal-complete or watchdog handle the actual close.
+    if (this.config.maxFixIterations > 0) {
+      const finalVerifyMessages = this.collectAgentMessagesSince(verifyStartedAt)
+      const stillNoGo = finalVerifyMessages.filter(m => hasNoGoMarker(m.content))
+      if (stillNoGo.length > 0) {
+        appendMessage(this.options.team.id, {
+          id: uuidv4(),
+          teamId: this.options.team.id,
+          from: 'ensemble',
+          to: 'team',
+          content: `🚧 Auto-fix budget exhausted after ${this.config.maxFixIterations} iteration(s) — VERIFY still NO-GO. Team standing by for human direction or signal-complete.`,
+          type: 'chat',
+          timestamp: this.now().toISOString(),
+          meta: {
+            event: 'auto_fix_exhausted',
+            iterations: this.config.maxFixIterations,
+            noGoSenders: [...new Set(stillNoGo.map(m => m.from))],
+          },
+        })
+      }
+    }
+  }
+
+  private collectAgentMessagesSince(sinceTimestamp: string): ReturnType<typeof getMessages> {
+    const all = getMessages(this.options.team.id, sinceTimestamp)
+    const agentNames = new Set(this.agentNames())
+    return all.filter(m => agentNames.has(m.from))
+  }
+
+  private summarizeBlockers(verifyMessages: ReturnType<typeof getMessages>): string {
+    // Pull lines that look like blocker enumerations from each verify-phase
+    // message. Heuristic: lines starting with a marker (•, *, -, 1.) OR
+    // containing "blocker" / "no-go" / "fail" / "reject". Cap to 12 entries
+    // so the FIX prompt stays readable.
+    const lines: string[] = []
+    for (const m of verifyMessages) {
+      if (!hasNoGoMarker(m.content)) continue
+      for (const raw of m.content.split('\n')) {
+        const line = raw.trim()
+        if (!line) continue
+        if (/^[•*\-]\s+/.test(line) || /^\d+[.)]\s+/.test(line) || /\b(blocker|no[-_ ]go|fail(ed)?|reject(ed)?|unfixed|missing|broken)\b/i.test(line)) {
+          lines.push(`  ${line}`)
+        }
+        if (lines.length >= 12) break
+      }
+      if (lines.length >= 12) break
+    }
+    if (lines.length === 0) return '  (no structured blockers extracted — re-read the most recent VERIFY messages via team-read for context)'
+    return lines.join('\n')
   }
 
   /**

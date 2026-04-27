@@ -82,6 +82,11 @@ export interface StagedWorkflowConfig {
   execTimeoutMs?: number   // Max time for EXEC phase before auto-advancing (default: 300000 = 5min)
   verifyTimeoutMs?: number // Max time for VERIFY phase before completing (default: 120000 = 2min)
   pollIntervalMs?: number  // How often to check for phase completion (default: 5000 = 5s)
+  // Auto-fix loop: when VERIFY concludes NO-GO, run another EXEC + VERIFY
+  // pair with the blockers list. Bounded to maxFixIterations (default 2) to
+  // prevent runaway loops; after the cap an escalation message lands in the
+  // team feed so the user / watchdog can take it from there.
+  maxFixIterations?: number  // 0 disables auto-fix entirely (default: 2)
 }
 
 export interface CollabTemplateRole {
