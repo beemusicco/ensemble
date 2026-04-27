@@ -32,6 +32,10 @@ CWD="$(cd "$CWD" 2>/dev/null && pwd || echo "$CWD")"
 AGENTS="${3:-}"  # Optional: comma-separated agent names (e.g. "gemini,claude")
 TARGET_PANE="${4:-}"  # Optional: tmux pane ID for monitor split
 TEMPLATE_OVERRIDE="${5:-${COLLAB_TEMPLATE:-}}"  # Optional: explicit template name (else auto-detect)
+# 6th positional arg (or COLLAB_CHALLENGE env) overrides challenge mode auto-pick.
+# Allowed values: normal | rigorous | sparring. Empty/anything-else falls back
+# to keyword + template auto-detection.
+CHALLENGE_OVERRIDE="${6:-${COLLAB_CHALLENGE:-${ENSEMBLE_CHALLENGE_MODE:-}}}"
 API="http://localhost:23000"
 HOST_ID="${ENSEMBLE_HOST_ID:-local}"
 
@@ -94,17 +98,19 @@ detect_template() {
 }
 TEMPLATE_NAME="$(detect_template "$TASK")"
 
-# Challenge mode auto-pick. Order:
-#   1. ENSEMBLE_CHALLENGE_MODE env wins absolutely
+# Challenge mode auto-pick. Priority:
+#   1. CLI override (positional arg 6 OR COLLAB_CHALLENGE / ENSEMBLE_CHALLENGE_MODE env)
 #   2. Explicit keyword in task: sparring|podjebavanje|nemiri|adversarial.heat → sparring
 #   3. Rigorous-by-default templates: premium-quad/ultrareview/pentest/adversarial/crypto-strategy/debug
 #   4. Default: normal
 detect_challenge_mode() {
-  local task_lower
+  local task_lower override
+  override="$3"
+  case "$override" in
+    normal|rigorous|sparring)
+      printf '%s' "$override"; return ;;
+  esac
   task_lower=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  if [ -n "${ENSEMBLE_CHALLENGE_MODE:-}" ]; then
-    printf '%s' "$ENSEMBLE_CHALLENGE_MODE"; return
-  fi
   if echo "$task_lower" | grep -qE '\b(sparring|adversarial.heat|high.heat)\b|\b(podjebavanj|nemir)'; then
     printf 'sparring'; return
   fi
@@ -114,7 +120,7 @@ detect_challenge_mode() {
   esac
   printf 'normal'
 }
-CHALLENGE_MODE="$(detect_challenge_mode "$TASK" "$TEMPLATE_NAME")"
+CHALLENGE_MODE="$(detect_challenge_mode "$TASK" "$TEMPLATE_NAME" "$CHALLENGE_OVERRIDE")"
 
 # ─── Colors ───
 G='\033[92m'; C='\033[96m'; D='\033[2m'; W='\033[97m'; BD='\033[1m'; R='\033[0m'
