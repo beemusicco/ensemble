@@ -123,6 +123,12 @@ class EnsembleService {
   private readonly watchdog: AgentWatchdog
 
   constructor() {
+    // Boot-time cleanup of teams left in 'forming' / 'spawning' state by a
+    // server crash or restart mid-spawn. Without this, the registry
+    // accumulates zombies that can't be resumed but still block resume-
+    // detection / scope-large auto-worktrees on the same cwd.
+    void this.cleanupOrphanedSpawns()
+
     this.idleCheckTimer = setInterval(() => {
       void this.checkIdleTeams()
     }, IDLE_CHECK_INTERVAL_MS)
@@ -323,6 +329,48 @@ class EnsembleService {
         })
       }
     } catch { /* non-fatal — supervisor failures must never break the service */ }
+  }
+
+  /**
+   * Boot-time cleanup of teams the registry left in 'forming'/'spawning' state.
+   * These are produced when the server crashes or is restarted mid-spawn — the
+   * createEnsembleTeamInner loop is interrupted, so the team transitions
+   * 'forming' → ... → never reaches 'active', and tmux sessions / worktrees
+   * may be in a half-built state. Without cleanup the operator sees an
+   * undismissable zombie in /api/ensemble/teams and resume-detection flags
+   * the cwd as occupied.
+   *
+   * Heuristic: any team with status 'forming' AND createdAt > 60s ago is
+   * orphaned (a healthy spawn finishes inside that window). We disband it
+   * with a clear reason so the cause is auditable in the disband log.
+   */
+  private async cleanupOrphanedSpawns(): Promise<void> {
+    try {
+      const teams = loadTeams()
+      const STALE_FORMING_AGE_MS = 60_000
+      const now = Date.now()
+      const stuck = teams.filter(t => {
+        if (t.status !== 'forming') return false
+        const created = new Date(t.createdAt || '').getTime()
+        if (!Number.isFinite(created)) return false
+        return now - created > STALE_FORMING_AGE_MS
+      })
+      if (stuck.length === 0) return
+      console.warn(`[Ensemble] Found ${stuck.length} orphaned 'forming' team(s) at boot — disbanding`)
+      for (const team of stuck) {
+        try {
+          await disbandTeam(team.id, 'orphaned spawn (server restart mid-spawn)', {
+            triggeredBy: 'boot-cleanup',
+            createdAt: team.createdAt,
+            staleSeconds: Math.round((now - new Date(team.createdAt).getTime()) / 1000),
+          })
+        } catch (err) {
+          console.error(`[Ensemble] Boot cleanup failed for ${team.id}:`, err)
+        }
+      }
+    } catch (err) {
+      console.error('[Ensemble] cleanupOrphanedSpawns top-level error:', err)
+    }
   }
 
   private stop(): void {
