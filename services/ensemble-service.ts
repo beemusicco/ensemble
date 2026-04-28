@@ -526,49 +526,72 @@ function buildChallengeBlock(mode: 'normal' | 'rigorous' | 'sparring'): string {
   ].join('\n')
 }
 
-// Known project roots and their canonical tag identifiers. When a memory is
-// tagged with one of these, it's project-specific; agents working on a
-// DIFFERENT project should not see it in their TEAM MEMORIES block.
+// Tags that identify a memory as belonging to a specific project. When a
+// memory is tagged with one of these, it's scoped to that project; agents
+// working on a DIFFERENT project should not see it in their TEAM MEMORIES.
 //
-// Add new projects here as they get cwd-rooted collabs. The tag must match
-// what team-remember.sh uses (or what agents organically tag with) — both
-// 'accounting-helper' and 'crypto-trading-platform' are observed in the
-// existing memory store.
-const KNOWN_PROJECT_TAGS = [
-  'accounting-helper',
-  'libro',
-  'crypto-trading-platform',
-  'paper-trading',
-  'paper_trading',
-  'paper_trades_db',
-  'brainai-dashboard',
-  'brain-a2a',
-  'tcg-price-tracker',
-  'cs2-betting',
-] as const
+// Two kinds of tags here:
+//   1. Canonical project basenames (e.g. 'accounting-helper',
+//      'crypto-trading-platform') — used to derive the project from cwd
+//      and as primary filter keys.
+//   2. Domain-specific tags strongly associated with one project, even
+//      when the memory was saved without an explicit project basename
+//      (e.g. 'iron_law', 'scalp_perp_basis_fade' for crypto trading,
+//      'postmark' for libro mail intake). Agents organically tag with
+//      domain terms more than project names, so this list catches the
+//      cross-project leak that pure project-name filtering misses.
+//
+// Each entry tagged with its owning project. Memories whose tags include
+// ANY of the OTHER project's domain tags are excluded.
+const PROJECT_DOMAIN_TAGS: Record<string, ReadonlySet<string>> = {
+  'accounting-helper': new Set([
+    'accounting-helper', 'libro', 'postmark', 'intake', 'sectionheader',
+    'invoice-events', 'erp-sync', 'bank_sync',
+  ]),
+  'crypto-trading-platform': new Set([
+    'crypto-trading-platform', 'paper-trading', 'paper_trading', 'paper_trades_db',
+    'iron_law', 'scalp_perp_basis_fade', 'liquidity_tier', 'liquidity_tier_hypothesis',
+    'edge_classifier', 'pre_registration', 'regime_tagging', 'feature_snapshot',
+    'kill_list', 'span_gate', 'l3_placebo_null_caveat', 'pooled', 'backtest',
+    'paper_signals', 'whale_pack', 'retail_fade', 'sprint',
+  ]),
+  'brainai-dashboard': new Set(['brainai-dashboard', 'dashboard-api']),
+  'brain-a2a': new Set(['brain-a2a']),
+  'tcg-price-tracker': new Set(['tcg-price-tracker', 'tcg']),
+  'cs2-betting': new Set(['cs2-betting', 'cs2']),
+}
+// Flat set of every project-scoped tag — used to detect "memory has SOME
+// project-specific tag but not the current one's" → exclude.
+const ALL_PROJECT_TAGS = new Set<string>(
+  Object.values(PROJECT_DOMAIN_TAGS).flatMap(s => Array.from(s))
+)
+// Canonical project basenames that we'll match against cwd's basename.
+const KNOWN_PROJECT_BASENAMES = new Set(Object.keys(PROJECT_DOMAIN_TAGS).concat(['libro']))
 
-// Conservative cwd → project tag mapping. We match by basename of cwd
+// Conservative cwd → project basename mapping. We match by basename of cwd
 // (typical project layout: ~/projects/<name>, ~/.openclaw/workspace/skills/<name>).
+// 'libro' is an alias for accounting-helper.
 function currentProjectFromCwd(cwd?: string): string | undefined {
   if (!cwd) return undefined
   const base = path.basename(cwd)
   if (!base) return undefined
-  // Direct match (basename = canonical tag)
-  if ((KNOWN_PROJECT_TAGS as readonly string[]).includes(base)) return base
+  if (base === 'libro') return 'accounting-helper'
+  if (KNOWN_PROJECT_BASENAMES.has(base)) return base
   return undefined
 }
 
-// True if the memory is tagged with a project tag OTHER than `currentProject`.
-// Such memories are explicitly scoped to a different project and must be
-// excluded from the current prompt's context. Memories with no project tag
-// are treated as generic and remain available cross-project.
+// True if the memory carries any tag that identifies it with a DIFFERENT
+// project than `currentProject`. Memories with only generic tags (architect,
+// refactor, a11y, p0_blocker, etc.) are treated as cross-project lessons
+// and remain available.
 function isTaggedWithDifferentProject(
   memory: { tags: string[] },
   currentProject: string,
 ): boolean {
+  const ownDomain = PROJECT_DOMAIN_TAGS[currentProject]
   for (const tag of memory.tags) {
-    if (tag === currentProject) continue
-    if ((KNOWN_PROJECT_TAGS as readonly string[]).includes(tag)) return true
+    if (ownDomain && ownDomain.has(tag)) continue   // tag belongs to current project
+    if (ALL_PROJECT_TAGS.has(tag)) return true       // tag belongs to a different project
   }
   return false
 }
@@ -632,7 +655,13 @@ export function buildPromptPreview(params: {
     const project = currentProjectFromCwd(params.workingDirectory)
     let chosen = [] as ReturnType<typeof queryMemories>
     if (project) {
-      const tagged = queryMemories({ scope: 'global', tags: [project], limit: 5 })
+      // Primary lookup: any of the project's domain tags. queryMemories does
+      // OR semantics on the tag filter, so this catches memories tagged with
+      // the canonical project name OR domain-specific tags (iron_law,
+      // postmark, etc.) — both are valid project signals.
+      const projectTags = PROJECT_DOMAIN_TAGS[project]
+      const tagList = projectTags ? Array.from(projectTags) : [project]
+      const tagged = queryMemories({ scope: 'global', tags: tagList, limit: 5 })
       chosen = tagged
       const remaining = 5 - tagged.length
       if (remaining > 0) {
