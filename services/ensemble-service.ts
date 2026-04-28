@@ -526,6 +526,53 @@ function buildChallengeBlock(mode: 'normal' | 'rigorous' | 'sparring'): string {
   ].join('\n')
 }
 
+// Known project roots and their canonical tag identifiers. When a memory is
+// tagged with one of these, it's project-specific; agents working on a
+// DIFFERENT project should not see it in their TEAM MEMORIES block.
+//
+// Add new projects here as they get cwd-rooted collabs. The tag must match
+// what team-remember.sh uses (or what agents organically tag with) — both
+// 'accounting-helper' and 'crypto-trading-platform' are observed in the
+// existing memory store.
+const KNOWN_PROJECT_TAGS = [
+  'accounting-helper',
+  'libro',
+  'crypto-trading-platform',
+  'paper-trading',
+  'paper_trading',
+  'paper_trades_db',
+  'brainai-dashboard',
+  'brain-a2a',
+  'tcg-price-tracker',
+  'cs2-betting',
+] as const
+
+// Conservative cwd → project tag mapping. We match by basename of cwd
+// (typical project layout: ~/projects/<name>, ~/.openclaw/workspace/skills/<name>).
+function currentProjectFromCwd(cwd?: string): string | undefined {
+  if (!cwd) return undefined
+  const base = path.basename(cwd)
+  if (!base) return undefined
+  // Direct match (basename = canonical tag)
+  if ((KNOWN_PROJECT_TAGS as readonly string[]).includes(base)) return base
+  return undefined
+}
+
+// True if the memory is tagged with a project tag OTHER than `currentProject`.
+// Such memories are explicitly scoped to a different project and must be
+// excluded from the current prompt's context. Memories with no project tag
+// are treated as generic and remain available cross-project.
+function isTaggedWithDifferentProject(
+  memory: { tags: string[] },
+  currentProject: string,
+): boolean {
+  for (const tag of memory.tags) {
+    if (tag === currentProject) continue
+    if ((KNOWN_PROJECT_TAGS as readonly string[]).includes(tag)) return true
+  }
+  return false
+}
+
 /**
  * Read the optional .collab-protect file at the repo root and return a list
  * of patterns. Each non-empty, non-comment line is a glob the agent must NOT
@@ -572,11 +619,37 @@ export function buildPromptPreview(params: {
   const safeDescription = sanitizeTaskDescription(params.description)
   const isThinkingMode = params.templateName === 'thinking'
 
+  // FIX: scope memories to the current project. The global memory store
+  // mixes findings across all collabs (crypto trading + libro accounting +
+  // future projects), and "TEAM MEMORIES" block was injecting crypto
+  // memories into libro prompts (and vice versa) — token waste plus a real
+  // risk that an agent cites unrelated crypto context in a libro decision.
+  // Now: prefer memories explicitly tagged with the current project; pad
+  // the remainder with truly project-agnostic memories (no cross-project
+  // tag); exclude memories tagged with OTHER known projects.
   let memoriesBlock = ''
   try {
-    const globals = queryMemories({ scope: 'global', limit: 5 })
-    if (globals.length) {
-      const lines = globals.map(m => {
+    const project = currentProjectFromCwd(params.workingDirectory)
+    let chosen = [] as ReturnType<typeof queryMemories>
+    if (project) {
+      const tagged = queryMemories({ scope: 'global', tags: [project], limit: 5 })
+      chosen = tagged
+      const remaining = 5 - tagged.length
+      if (remaining > 0) {
+        const pool = queryMemories({ scope: 'global', limit: 50 })
+        const taggedIds = new Set(tagged.map(t => t.id))
+        const generic = pool.filter(m =>
+          !taggedIds.has(m.id) && !isTaggedWithDifferentProject(m, project)
+        )
+        chosen = [...tagged, ...generic.slice(0, remaining)]
+      }
+    } else {
+      // No project context (e.g. cwd outside known roots) → fall back to
+      // the original global query.
+      chosen = queryMemories({ scope: 'global', limit: 5 })
+    }
+    if (chosen.length) {
+      const lines = chosen.map(m => {
         const tags = m.tags.length ? ` [${m.tags.join(',')}]` : ''
         return `  - ${m.key}${tags}: ${m.value.slice(0, 200)}`
       }).join('\n')

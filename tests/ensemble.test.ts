@@ -986,6 +986,78 @@ describe('buildPromptPreview() — injection guard + completion guidance', () =>
       fs.rmSync(tmpRoot, { recursive: true, force: true })
     }
   })
+
+  // Memory cross-project leak fix — accounting-helper collab must not see
+  // crypto memories in the TEAM MEMORIES block, and vice versa.
+  it('filters TEAM MEMORIES to exclude memories tagged with a different project', async () => {
+    // Spin up an isolated registry root so memories don't bleed from real disk
+    const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-filter-'))
+    const tmpCwd = path.join(tmpDataDir, 'projects', 'accounting-helper')
+    fs.mkdirSync(tmpCwd, { recursive: true })
+    const oldEnsembleDataDir = process.env.ENSEMBLE_DATA_DIR
+    process.env.ENSEMBLE_DATA_DIR = tmpDataDir
+    vi.resetModules()
+    try {
+      const { writeMemory } = await import('../lib/memory-store')
+      // Seed: 2 crypto memories, 1 libro memory, 1 generic memory
+      writeMemory({ scope: 'global', key: 'scalp_signal_2026', value: 'scalp signal pattern',
+                   tags: ['scalp_perp_basis_fade', 'crypto-trading-platform'] })
+      writeMemory({ scope: 'global', key: 'paper_db_span',     value: 'paper db span info',
+                   tags: ['paper_trades_db', 'data_span'] })
+      writeMemory({ scope: 'global', key: 'section_header',    value: 'section header pattern',
+                   tags: ['accounting-helper', 'frontend'] })
+      writeMemory({ scope: 'global', key: 'general_pattern',   value: 'cross-project lesson',
+                   tags: ['general', 'lesson'] })
+
+      const { buildPromptPreview } = await import('../services/ensemble-service')
+      const prompt = buildPromptPreview({
+        teamId: 't1', teamName: 'team-x', description: 'libro task',
+        agentName: 'codex-1', teammateNames: ['claude-2'], agentIndex: 0,
+        workingDirectory: tmpCwd,  // basename = accounting-helper
+      })
+
+      // Libro-tagged memory must appear
+      expect(prompt).toContain('section_header')
+      // Generic memory (no project tag) must appear
+      expect(prompt).toContain('general_pattern')
+      // Crypto-tagged memory must NOT appear
+      expect(prompt).not.toContain('scalp_signal_2026')
+      // paper_trades_db is a known cross-project tag → excluded
+      expect(prompt).not.toContain('paper_db_span')
+    } finally {
+      if (oldEnsembleDataDir === undefined) delete process.env.ENSEMBLE_DATA_DIR
+      else process.env.ENSEMBLE_DATA_DIR = oldEnsembleDataDir
+      fs.rmSync(tmpDataDir, { recursive: true, force: true })
+      vi.resetModules()
+    }
+  })
+
+  it('falls back to global memories when cwd is outside known project roots', async () => {
+    const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-nogated-'))
+    const oldEnsembleDataDir = process.env.ENSEMBLE_DATA_DIR
+    process.env.ENSEMBLE_DATA_DIR = tmpDataDir
+    vi.resetModules()
+    try {
+      const { writeMemory } = await import('../lib/memory-store')
+      writeMemory({ scope: 'global', key: 'm1', value: 'crypto stuff', tags: ['crypto-trading-platform'] })
+      writeMemory({ scope: 'global', key: 'm2', value: 'libro stuff',  tags: ['accounting-helper'] })
+
+      const { buildPromptPreview } = await import('../services/ensemble-service')
+      const prompt = buildPromptPreview({
+        teamId: 't1', teamName: 'team-x', description: 'unknown-cwd task',
+        agentName: 'codex-1', teammateNames: ['claude-2'], agentIndex: 0,
+        workingDirectory: '/some/random/path/no-project-name',
+      })
+      // No project context → both memories appear (legacy behavior)
+      expect(prompt).toContain('m1')
+      expect(prompt).toContain('m2')
+    } finally {
+      if (oldEnsembleDataDir === undefined) delete process.env.ENSEMBLE_DATA_DIR
+      else process.env.ENSEMBLE_DATA_DIR = oldEnsembleDataDir
+      fs.rmSync(tmpDataDir, { recursive: true, force: true })
+      vi.resetModules()
+    }
+  })
 })
 
 // ─────────────────────────────────────────────────────
