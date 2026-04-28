@@ -1047,6 +1047,97 @@ describe('buildPromptPreview() — injection guard + completion guidance', () =>
     }
   })
 
+  // Auto-learning extraction — no LLM call, deterministic patterns, dedupe.
+  it('auto-extracts VERIFY NO-GO blocker lessons on disband', async () => {
+    const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-learn-nogo-'))
+    const tmpCwd = path.join(tmpDataDir, 'projects', 'accounting-helper')
+    fs.mkdirSync(tmpCwd, { recursive: true })
+    const oldDataDir = process.env.ENSEMBLE_DATA_DIR
+    process.env.ENSEMBLE_DATA_DIR = tmpDataDir
+    vi.resetModules()
+    try {
+      const { createTeam, appendMessage } = await import('../lib/ensemble-registry')
+      const team = createTeam({
+        name: 'auto-learn-team', description: 'libro polish',
+        agents: [{ program: 'codex', role: 'lead', hostId: 'local' }],
+        workingDirectory: tmpCwd,
+      })
+      appendMessage(team.id, {
+        id: 'm1', teamId: team.id, from: 'codex-1', to: 'team',
+        content: '[VERIFY_DONE] gate: NO-GO\n' +
+          '- Blocker 1: AuditPage.jsx:266 missing aria-expanded on row\n' +
+          '- Blocker 2: SettingsPage.jsx:142 broken keychain key mismatch\n' +
+          '- Blocker 3: useSSE.jsx:21 reconnect listener missing',
+        type: 'chat', timestamp: '2026-04-28T10:00:00Z',
+      })
+      appendMessage(team.id, {
+        id: 'm2', teamId: team.id, from: 'claude-1', to: 'team',
+        content: 'Confirmed all three.', type: 'chat', timestamp: '2026-04-28T10:00:01Z',
+      })
+      appendMessage(team.id, {
+        id: 'm3', teamId: team.id, from: 'haiku-3', to: 'team',
+        content: 'GOTCHA: when migrating SectionHeader, parent div with flex justify-between must wrap both children — otherwise layout breaks on tablet width.',
+        type: 'chat', timestamp: '2026-04-28T10:00:02Z',
+      })
+      appendMessage(team.id, {
+        id: 'm4', teamId: team.id, from: 'codex-1', to: 'team',
+        content: '🔍 codex-1: claude-1 claimed fix landed — counter: src/hooks/useSSE.jsx:21-27 still has reconnect bug, addEventListener never reattached on second connect.',
+        type: 'chat', timestamp: '2026-04-28T10:00:03Z',
+      })
+      const { disbandTeam } = await import('../services/ensemble-service')
+      await disbandTeam(team.id, 'test', { triggeredBy: 'unit-test' })
+      const { queryMemories } = await import('../lib/memory-store')
+      const lessons = queryMemories({ scope: 'global', tags: ['auto_extracted'], limit: 50 })
+      expect(lessons.length).toBeGreaterThanOrEqual(4)
+      expect(lessons.some(l => l.value.includes('AuditPage.jsx:266'))).toBe(true)
+      expect(lessons.some(l => l.value.includes('keychain key mismatch'))).toBe(true)
+      expect(lessons.some(l => l.value.includes('useSSE.jsx:21'))).toBe(true)
+      expect(lessons.some(l => l.value.includes('SectionHeader'))).toBe(true)
+      const taggedAccounting = lessons.filter(l => l.tags.includes('accounting-helper'))
+      expect(taggedAccounting.length).toBe(lessons.length)
+    } finally {
+      if (oldDataDir === undefined) delete process.env.ENSEMBLE_DATA_DIR
+      else process.env.ENSEMBLE_DATA_DIR = oldDataDir
+      fs.rmSync(tmpDataDir, { recursive: true, force: true })
+      vi.resetModules()
+    }
+  })
+
+  it('does NOT extract lessons when message thread is too short or has no patterns', async () => {
+    const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-learn-empty-'))
+    const tmpCwd = path.join(tmpDataDir, 'projects', 'accounting-helper')
+    fs.mkdirSync(tmpCwd, { recursive: true })
+    const oldDataDir = process.env.ENSEMBLE_DATA_DIR
+    process.env.ENSEMBLE_DATA_DIR = tmpDataDir
+    vi.resetModules()
+    try {
+      const { createTeam, appendMessage } = await import('../lib/ensemble-registry')
+      const team = createTeam({
+        name: 'empty-team', description: 'small chat',
+        agents: [{ program: 'codex', role: 'lead', hostId: 'local' }],
+        workingDirectory: tmpCwd,
+      })
+      appendMessage(team.id, {
+        id: 'm1', teamId: team.id, from: 'codex-1', to: 'team',
+        content: 'Plan ready, starting now.', type: 'chat', timestamp: '2026-04-28T10:00:00Z',
+      })
+      appendMessage(team.id, {
+        id: 'm2', teamId: team.id, from: 'claude-1', to: 'team',
+        content: 'Looks good.', type: 'chat', timestamp: '2026-04-28T10:00:01Z',
+      })
+      const { disbandTeam } = await import('../services/ensemble-service')
+      await disbandTeam(team.id, 'test', { triggeredBy: 'unit-test' })
+      const { queryMemories } = await import('../lib/memory-store')
+      const lessons = queryMemories({ scope: 'global', tags: ['auto_extracted'], limit: 50 })
+      expect(lessons.length).toBe(0)
+    } finally {
+      if (oldDataDir === undefined) delete process.env.ENSEMBLE_DATA_DIR
+      else process.env.ENSEMBLE_DATA_DIR = oldDataDir
+      fs.rmSync(tmpDataDir, { recursive: true, force: true })
+      vi.resetModules()
+    }
+  })
+
   it('falls back to global memories when cwd is outside known project roots', async () => {
     const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-nogated-'))
     const oldEnsembleDataDir = process.env.ENSEMBLE_DATA_DIR

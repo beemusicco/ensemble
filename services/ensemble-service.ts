@@ -25,7 +25,7 @@ import {
   collabRuntimeDir, collabFinishedMarker, collabBridgePosted,
   collabBridgeResult, ensureCollabDirs, collabMessagesFile,
 } from '../lib/collab-paths'
-import { queryMemories } from '../lib/memory-store'
+import { queryMemories, writeMemory } from '../lib/memory-store'
 import { appendCostEntry } from '../lib/cost-ledger'
 import { startSpan, endSpan } from '../lib/tracer'
 import { analyzeThinking, pruneAlreadyWarned, getCurrentPhase } from '../lib/thinking-phases'
@@ -648,6 +648,134 @@ function isTaggedWithDifferentProject(
     if (ALL_PROJECT_TAGS.has(tag)) return true       // tag belongs to a different project
   }
   return false
+}
+
+// VERIFY NO-GO patterns reused from staged-workflow auto-fix detection.
+// Kept here as a local mirror to avoid reaching into staged-workflow
+// internals from disbandTeam.
+const VERIFY_NO_GO_PATTERNS = [
+  /\bNO[-_ ]GO\b/i,
+  /\bNOT[-_ ]APPROVED\b/i,
+  /\bverify[: ]+failed\b/i,
+  /\bgate[: ]+(failed|fail|reject(ed)?)\b/i,
+  /\b(verify|review)[: ]+(reject(ed)?|denied)\b/i,
+  /\[NO[-_ ]GO\]/i,
+  /\[REJECTED\]/i,
+]
+// Explicit "future-team please remember" markers an agent might emit
+// without calling team-remember.sh themselves.
+const GOTCHA_MARKER_RE = /\b(GOTCHA|LESSON|WARNING|REMEMBER|NOTE TO FUTURE|FUTURE TEAMS)[:\s]+([^\n]{30,500})/i
+// Sparring-mode counter format: 🔍 [agent]: ... — counter: <evidence>
+// We only treat it as a lesson if the counter cites concrete file:line
+// or command-output evidence — opinion-only counters are noise.
+const SPARRING_COUNTER_RE = /🔍\s+[\w@-]+[:\s][^\n]*?counter[:\s]+([^\n]{30,500})/i
+const FILE_LINE_RE = /[A-Za-z0-9_/.\-]+\.(ts|tsx|js|jsx|py|sh|md|json|sql|yaml|yml|css|scss|html|svelte|vue|go|rs|kt|java|cpp|h)\b/
+
+function shortHash(s: string): string {
+  // Stable short hash, no crypto dep — tied to content for dedupe key.
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0
+  return Math.abs(h).toString(36).slice(0, 8)
+}
+
+/**
+ * Extract structured lessons from a disbanded team's messages and write
+ * them to the global memory store. No LLM call — three deterministic
+ * patterns:
+ *   1. VERIFY NO-GO blockers (verdict messages from VERIFY phase)
+ *   2. Sparring counter-finds with file:line evidence
+ *   3. Explicit GOTCHA / LESSON / REMEMBER markers in agent text
+ *
+ * Each lesson is keyed by content hash so reruns of the same finding
+ * dedupe naturally. Capped at MAX_LESSONS per disband to avoid memory
+ * spam from chatty teams.
+ *
+ * The caller (disbandTeam) wraps this in try/catch — extraction failures
+ * never break the disband path.
+ */
+function extractAndSaveLessons(
+  teamId: string,
+  team: { id: string; name: string; description?: string },
+  project?: string,
+): void {
+  const MAX_LESSONS = 10
+  const messages = getMessages(teamId)
+  const agentMessages = messages.filter(m => m.from !== 'ensemble' && m.from !== 'user')
+  if (agentMessages.length < 4) return  // not enough signal to be worth extracting
+
+  type Lesson = { key: string; value: string; tags: string[]; agent: string }
+  const lessons: Lesson[] = []
+  const seenKeys = new Set<string>()
+  const baseTags = ['auto_extracted', team.id.slice(0, 8)]
+  if (project) baseTags.push(project)
+
+  function add(category: string, value: string, agent: string, extraTags: string[]): void {
+    const trimmed = value.trim().slice(0, 500)
+    if (trimmed.length < 30) return
+    const hash = shortHash(category + '|' + trimmed)
+    const key = `lesson_${category}_${hash}`
+    if (seenKeys.has(key)) return
+    seenKeys.add(key)
+    lessons.push({
+      key,
+      value: trimmed,
+      tags: [...baseTags, category, ...extraTags].filter((t, i, a) => t && a.indexOf(t) === i),
+      agent,
+    })
+  }
+
+  for (const m of agentMessages) {
+    if (lessons.length >= MAX_LESSONS) break
+    const content = m.content || ''
+    const sender = m.from || 'unknown'
+
+    // 1. VERIFY NO-GO blockers — extract bulleted/numbered lines from a
+    //    NO-GO verdict message that mention concrete blocker language.
+    if (VERIFY_NO_GO_PATTERNS.some(p => p.test(content))) {
+      for (const raw of content.split('\n')) {
+        const line = raw.trim()
+        if (!line) continue
+        if (!/^[•*\-]\s+|^\d+[.)]\s+/.test(line)) continue
+        if (!/\b(blocker|missing|broken|failed|reject|incomplete|stale|wrong|breaks)\b/i.test(line)) continue
+        add('verify_blocker', line, sender, ['verify_blocker'])
+        if (lessons.length >= MAX_LESSONS) break
+      }
+    }
+
+    // 2. Sparring-mode counter with file:line evidence — concrete pushback
+    //    that landed (an opinion-only counter has no .ext token).
+    const counterMatch = content.match(SPARRING_COUNTER_RE)
+    if (counterMatch && FILE_LINE_RE.test(counterMatch[1])) {
+      add('adversarial_finding', counterMatch[1], sender, ['adversarial_finding', 'sparring'])
+    }
+
+    // 3. Explicit GOTCHA / LESSON / WARNING / REMEMBER marker.
+    const gotchaMatch = content.match(GOTCHA_MARKER_RE)
+    if (gotchaMatch) {
+      add('gotcha', gotchaMatch[2], sender, ['gotcha'])
+    }
+  }
+
+  if (lessons.length === 0) return
+
+  // Persist via memory-store. Uses project-tag-aware filter on the read
+  // side (buildPromptPreview), so writing without explicit project tag is
+  // safe — auto_extracted tag + project tag cover both filter paths.
+  for (const l of lessons) {
+    try {
+      writeMemory({
+        scope: 'global',
+        key: l.key,
+        value: l.value,
+        tags: l.tags,
+        agent: l.agent,
+        teamId: team.id,
+      })
+    } catch (err) {
+      console.error(`[Ensemble] writeMemory failed for ${l.key}:`, err)
+    }
+  }
+  console.log(`[Ensemble] Auto-extracted ${lessons.length} lesson(s) from team ${team.id.slice(0, 8)} → memory store`)
 }
 
 /**
@@ -1500,6 +1628,17 @@ export async function disbandTeam(
       if (fs.existsSync(f)) fs.unlinkSync(f)
     }
   } catch { /* non-fatal cleanup */ }
+
+  // Auto-learning: scan the disbanded team's messages for structured lesson
+  // patterns and persist them to the global memory store so future teams
+  // see them in TEAM MEMORIES. Pattern-only extraction — no LLM call.
+  // See extractAndSaveLessons() for the patterns + dedupe logic.
+  try {
+    const project = currentProjectFromCwd(team.workingDirectory)
+    extractAndSaveLessons(teamId, team, project)
+  } catch (err) {
+    console.error(`[Ensemble] Auto-learning extraction failed for ${teamId}:`, err)
+  }
 
   // Optional: save session summary to claude-mem
   try {
