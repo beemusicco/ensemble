@@ -601,11 +601,22 @@ export class AgentWatchdog {
       try {
         const sessionName = `${team.name}-${agent.name}`
         const tail = await runtime.capturePane(sessionName, 8)
-        // Idle markers per supported program; scan the LAST non-empty line so
-        // banners/headers in the upper viewport don't mask a busy bottom row.
+        // Idle markers — present when the agent CLI (Claude/Codex/Sonnet/
+        // Haiku/...) is waiting for input OR when it has exited and only
+        // the parent shell prompt is left. Either way the pane is NOT
+        // running a long command and the disband should proceed.
+        //  - ❯  Claude/Sonnet/Haiku CLI prompt
+        //  - ›  Codex CLI prompt
+        //  - >  generic prompt
+        //  - %  zsh prompt — added 2026-04-28 after team 86db468a zombied:
+        //       Claude CLI exited, leaving "aimusic@host ... %" at pane bottom.
+        //       The old regex missed % so the watchdog kept deferring the
+        //       all-stalled disband forever.
+        //  - $  bash/sh prompt
+        //  - #  root prompt
         const lines = tail.split('\n').map(l => l.trimEnd()).filter(l => l.length > 0)
         const lastLines = lines.slice(-4).join('\n')
-        const idle = /[❯›>](?:\s|$)|\$ ?$|# ?$/.test(lastLines)
+        const idle = /[❯›>%](?:\s|$)|\$ ?$|# ?$/.test(lastLines)
         if (!idle) return true   // not at idle prompt → command running
       } catch { /* capture failed → assume idle, fall through */ }
     }

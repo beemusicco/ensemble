@@ -285,6 +285,52 @@ describe('AgentWatchdog', () => {
     logSpy.mockRestore()
   })
 
+  // Regression — the zsh prompt "%" was missed by the original idle regex,
+  // which left team 86db468a stuck active forever after the Claude CLI exited
+  // and left "aimusic@dash X %" at pane bottom. The 2026-04-28 fix adds %
+  // to the idle character class.
+  it('treats zsh % prompt as idle (Claude CLI exited, parent shell remains)', async () => {
+    const disbandTeam = vi.fn(async () => {})
+    teams = [makeTeam({
+      agents: [
+        { agentId: 'agent-1', name: 'codex-1', program: 'codex', role: 'lead', hostId: 'local', status: 'active' },
+        { agentId: 'agent-2', name: 'claude-2', program: 'claude', role: 'worker', hostId: 'local', status: 'active' },
+      ],
+    })]
+    messages = [
+      makeMessage({ id: 'm1', from: 'codex-1', timestamp: '2026-03-19T10:00:00.000Z' }),
+      makeMessage({ id: 'm2', from: 'claude-2', timestamp: '2026-03-19T10:00:00.000Z' }),
+    ]
+    // Both agents' CLIs have exited — only the parent zsh prompt remains
+    const captureMock = vi.fn(async (session: string) =>
+      `Resume this session with: claude --resume X\naimusic@dash ${session} %`)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const watchdog = new AgentWatchdog({
+      loadTeams: () => teams,
+      getMessages: () => messages,
+      appendMessage: (_teamId, message) => appended.push(message),
+      disbandTeam,
+      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: captureMock }),
+      resolveAgentProgram: () => ({ inputMethod: 'sendKeys' }),
+      isSelf: () => true,
+      getHostById: () => undefined,
+      postRemoteSessionCommand,
+      collabDeliveryFile: (teamId, sessionName) => `/tmp/${teamId}/${sessionName}.txt`,
+      now: () => nowMs,
+      pollIntervalMs: 60_000,
+      nudgeAfterMs: 90_000,
+      stallAfterMs: 180_000,
+    })
+    await watchdog.poll()
+    nowMs += 91_000
+    await watchdog.poll()
+    nowMs += 181_000
+    await watchdog.poll()
+    expect(disbandTeam).toHaveBeenCalledWith('team-1', 'all agents stalled')
+    watchdog.stop()
+    warnSpy.mockRestore()
+  })
+
   it('proceeds with all-stalled disband when capturePane shows idle prompt on every agent', async () => {
     const disbandTeam = vi.fn(async () => {})
     teams = [makeTeam({
