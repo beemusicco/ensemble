@@ -32,11 +32,21 @@ What it does:
 1. Starts the ensemble server (if not running)
 2. Creates a team via API
 3. Starts the ensemble bridge
-4. Opens the TUI monitor (tmux split or background session)
+4. Opens the TUI monitor — picks the best viewer automatically (see table below)
 5. Starts a background message poller
 6. Waits for agents to begin communicating
 
-Output:
+**Monitor selection** (override with `COLLAB_MONITOR=tmux|iterm|none`):
+
+| Situation | Monitor opened |
+|---|---|
+| Inside tmux already | tmux split pane (right 40%) |
+| macOS + iTerm2, not in tmux | native iTerm2 split pane (default) |
+| Linux, or no iTerm2 | detached tmux session (`tmux attach -t ensemble-<id>`) |
+
+On macOS you can change the iTerm layout with `COLLAB_ITERM_MODE=split|tab|window` (default `split`).
+
+Output (macOS iTerm2 example):
 ```
 ◈ ensemble collab
   Review all API endpoints for security issues
@@ -44,7 +54,7 @@ Output:
   ✓ Server running
   ✓ Team created (collab-1774001029143-7384)
   ✓ Bridge started
-  ✓ Monitor ready (tmux attach -t ensemble-abc-123)
+  ✓ Monitor opened (iTerm split)
   ✓ Agents communicating (2 messages)
 
   Team is live! codex-1 + claude-2 are collaborating.

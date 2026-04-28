@@ -27,6 +27,7 @@
 
 ## P2 — Nice-to-haves
 
+- **iTerm2 split-pane visibility voor parallelle agents** — Claude Code's TeamCreate + Agent met `team_name` spawnt elke teammate in zijn eigen tmux pane, zichtbaar via iTerm2 split. Overwegen voor ensemble's tmux-based orchestratie: elke gespawnde agent krijgt automatisch een dedicated pane in de huidige iTerm2 window zodat de gebruiker live kan meekijken per agent i.p.v. logs scrollen. Referentie: ervaren 14 apr 2026 tijdens og-ops planning met sw-pm + sw-architect parallel.
 - API docs (OpenAPI/Swagger)
 - Plugin/extensibility system voor custom agent programs
 - Persistent storage beyond JSONL (SQLite etc.)

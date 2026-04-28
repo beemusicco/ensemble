@@ -287,12 +287,27 @@ SUPERVISOR_PGID=$(ps -p "$SUPERVISOR_PID" -o pgid= 2>/dev/null | tr -d ' ')
 echo -e "  ${CHECK} Bridge started"
 
 # ─── 4. Monitor ───
+# Monitor selection order (override via COLLAB_MONITOR=tmux|iterm|none):
+#   1. tmux split   — if already inside a tmux session
+#   2. iTerm split  — on macOS when iTerm2 is the active terminal (or forced)
+#   3. tmux detached session — cross-platform fallback
 MONITOR_CMD="cd '$REPO_DIR' && ./node_modules/.bin/tsx cli/monitor.ts $TEAM_ID"
-if [ -n "${TMUX:-}" ]; then
+MONITOR_PREF="${COLLAB_MONITOR:-auto}"
+
+use_iterm=false
+if [ "$MONITOR_PREF" = "iterm" ]; then
+  use_iterm=true
+elif [ "$MONITOR_PREF" = "auto" ] && [ -z "${TMUX:-}" ] \
+     && [ "$(uname)" = "Darwin" ] && [ "${TERM_PROGRAM:-}" = "iTerm.app" ]; then
+  use_iterm=true
+fi
+
+if [ "$MONITOR_PREF" = "none" ]; then
+  echo -e "  ${CHECK} Monitor skipped ${D}(COLLAB_MONITOR=none)${R}"
+  MONITOR_MODE="none"
+elif [ -n "${TMUX:-}" ] && [ "$MONITOR_PREF" != "iterm" ]; then
   # Resolve the pane the caller is running in (where the user typed /collab).
   # $TMUX_PANE is set per-pane by tmux — survives window switches.
-  # `tmux display-message -p` returns the session's *active* pane and lies if
-  # the user has changed windows in another tmux client.
   SPAWN_PANE="${TARGET_PANE:-${TMUX_PANE:-$(tmux display-message -p '#{pane_id}' 2>/dev/null || echo "")}}"
   if [ -n "$SPAWN_PANE" ]; then
     tmux split-window -h -t "$SPAWN_PANE" -l '40%' "$MONITOR_CMD"
@@ -301,6 +316,21 @@ if [ -n "${TMUX:-}" ]; then
   fi
   echo -e "  ${CHECK} Monitor opened ${D}(right panel)${R}"
   MONITOR_MODE="split"
+elif [ "$use_iterm" = true ]; then
+  ITERM_MODE="${COLLAB_ITERM_MODE:-split}"
+  if "$SCRIPT_DIR/open-iterm-monitor.sh" "$REPO_DIR" "$TEAM_ID" "$ITERM_MODE" 2>/tmp/ensemble-iterm.err; then
+    echo -e "  ${CHECK} Monitor opened ${D}(iTerm ${ITERM_MODE})${R}"
+    MONITOR_MODE="iterm"
+  else
+    echo -e "  ${D}iTerm launch failed: $(head -1 /tmp/ensemble-iterm.err 2>/dev/null)${R}"
+    echo -e "  ${D}Falling back to tmux session...${R}"
+    MONITOR_SESSION="ensemble-$TEAM_ID"
+    tmux kill-session -t "$MONITOR_SESSION" 2>/dev/null || true
+    tmux new-session -d -s "$MONITOR_SESSION" -c "$REPO_DIR" \
+      "./node_modules/.bin/tsx cli/monitor.ts $TEAM_ID"
+    echo -e "  ${CHECK} Monitor ready ${D}(tmux attach -t $MONITOR_SESSION)${R}"
+    MONITOR_MODE="session"
+  fi
 else
   MONITOR_SESSION="ensemble-$TEAM_ID"
   tmux kill-session -t "$MONITOR_SESSION" 2>/dev/null || true
@@ -357,6 +387,10 @@ echo -e "  ${BD}${G}Team is live!${R} ${W}${AGENT_NAMES}${R} are collaborating."
 echo ""
 if [ "$MONITOR_MODE" = "split" ]; then
   echo -e "  ${D}┌─ Monitor (right panel) ───────────────┐${R}"
+elif [ "$MONITOR_MODE" = "iterm" ]; then
+  echo -e "  ${D}┌─ Monitor (iTerm native pane) ─────────┐${R}"
+elif [ "$MONITOR_MODE" = "none" ]; then
+  echo -e "  ${D}┌─ Monitor (skipped) ───────────────────┐${R}"
 else
   echo -e "  ${D}┌─ Monitor ─────────────────────────────┐${R}"
   echo -e "  ${D}│${R}  ${D}tmux attach -t $MONITOR_SESSION${R}      ${D}│${R}"

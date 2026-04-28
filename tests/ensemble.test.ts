@@ -20,6 +20,14 @@ function makeMessage(overrides: Partial<EnsembleMessage> = {}): EnsembleMessage 
   }
 }
 
+function makeFillerMessages(teamId: string, beforeTs: string, n = 8): EnsembleMessage[] {
+  const base = new Date(beforeTs).getTime()
+  return Array.from({ length: n }, (_, i) => {
+    const ts = new Date(base - (n - i) * 60_000).toISOString()
+    return makeMessage({ from: i % 2 === 0 ? 'codex-1' : 'claude-2', teamId, content: `Working on step ${i + 1}`, timestamp: ts })
+  })
+}
+
 function makeTeam(overrides: Partial<EnsembleTeam> = {}): EnsembleTeam {
   return {
     id: overrides.id ?? 'team-1',
@@ -270,6 +278,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
   it('auto-disbands when two different agents send high-confidence completion signals within 60s', async () => {
     const team = makeTeam()
     const messages: EnsembleMessage[] = [
+      ...makeFillerMessages('team-1', '2026-03-18T12:04:20.000Z'),
       makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'All work finished [DONE]', timestamp: '2026-03-18T12:04:20.000Z' }),
       makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'My part is [COMPLETE]', timestamp: '2026-03-18T12:04:50.000Z' }),
     ]
@@ -310,6 +319,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const team = makeTeam()
     // now = 12:05:00; last team msg at 11:54:30 → 630s idle > 600s threshold
     const messages: EnsembleMessage[] = [
+      ...makeFillerMessages('team-1', '2026-03-18T11:54:20.000Z'),
       makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[DONE] my part', timestamp: '2026-03-18T11:54:20.000Z' }),
       makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still investigating', timestamp: '2026-03-18T11:54:30.000Z' }),
     ]
@@ -373,6 +383,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     // than 60s apart, so the two-signal-window rule does NOT fire — only the
     // majority+idle rule should). Both edge-positioned for FIX 1 to recognize.
     const messages: EnsembleMessage[] = [
+      ...makeFillerMessages('team-1', '2026-03-18T11:51:30.000Z'),
       makeMessage({ from: 'claude-1', teamId: 'team-1', content: '[VERIFY_DONE] architecture review', timestamp: '2026-03-18T11:51:30.000Z' }),
       makeMessage({ from: 'sonnet-2', teamId: 'team-1', content: '[EXEC_DONE] landing fixes shipped', timestamp: '2026-03-18T11:53:30.000Z' }),
     ]
@@ -387,6 +398,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     const team = makeTeam()
     // now = 12:05:00; last team msg at 11:34:30 → 1830s idle > 1800s threshold
     const messages: EnsembleMessage[] = [
+      ...makeFillerMessages('team-1', '2026-03-18T11:34:20.000Z'),
       makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Task is done', timestamp: '2026-03-18T11:34:20.000Z' }),
       makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Wrapping up', timestamp: '2026-03-18T11:34:30.000Z' }),
     ]
@@ -483,6 +495,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     // now = 12:05:00; last NON-ensemble team msg at 11:54:30 → 630s idle > 600s threshold.
     // The ensemble message at 12:04:55 must NOT count as recent activity.
     const messages: EnsembleMessage[] = [
+      ...makeFillerMessages('team-1', '2026-03-18T11:54:25.000Z'),
       makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[DONE]', timestamp: '2026-03-18T11:54:25.000Z' }),
       makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still working', timestamp: '2026-03-18T11:54:30.000Z' }),
       makeMessage({ from: 'ensemble', teamId: 'team-1', content: 'Agent joined', timestamp: '2026-03-18T12:04:55.000Z' }),
@@ -497,6 +510,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
   it('auto-disbands on staged [EXEC_DONE] signals from two different agents within 60s', async () => {
     const team = makeTeam()
     const messages: EnsembleMessage[] = [
+      ...makeFillerMessages('team-1', '2026-03-18T12:04:20.000Z'),
       makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Implementation wrapped [EXEC_DONE]', timestamp: '2026-03-18T12:04:20.000Z' }),
       makeMessage({ from: 'claude-2', teamId: 'team-1', content: '[EXEC_DONE] — tests pass', timestamp: '2026-03-18T12:04:50.000Z' }),
     ]
@@ -510,6 +524,7 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
   it('auto-disbands on staged [VERIFY_DONE] signals from two different agents within 60s', async () => {
     const team = makeTeam()
     const messages: EnsembleMessage[] = [
+      ...makeFillerMessages('team-1', '2026-03-18T12:04:20.000Z'),
       makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[VERIFY_DONE] approved', timestamp: '2026-03-18T12:04:20.000Z' }),
       makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Cross-check ok [VERIFY_DONE]', timestamp: '2026-03-18T12:04:55.000Z' }),
     ]

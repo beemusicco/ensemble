@@ -2,7 +2,7 @@
 
 **Multi-agent collaboration engine** — AI agents that work as one.
 
-Ensemble orchestrates AI agents into collaborative teams. Out of the box it pairs **Claude Code + Codex** — they communicate, share findings, and solve problems together in real time. Built on tmux-based session management for transparent, observable agent interactions.
+Ensemble orchestrates AI agents into collaborative teams. Out of the box it pairs **Claude Code + Codex** — they communicate, share findings, and solve problems together in real time. On macOS + iTerm2 the live TUI monitor opens in a **native iTerm split pane** (no tmux needed); elsewhere, or when you're already inside tmux, it falls back to a tmux session. Agents themselves are orchestrated via the ensemble bridge — the monitor is just a viewer.
 
 > **Status:** Experimental developer tool. macOS and Linux only.
 
@@ -10,7 +10,7 @@ Ensemble orchestrates AI agents into collaborative teams. Out of the box it pair
 
 - **Team orchestration** — Spawn multi-agent teams with a single command
 - **Real-time messaging** — Agents communicate via a structured message bus
-- **TUI monitor** — Watch agent collaboration live from your terminal
+- **TUI monitor** — Live viewer that opens in a native iTerm2 split pane on macOS (or tmux elsewhere)
 - **Auto-disband** — Intelligent completion detection ends teams when work is done
 - **Multi-host support** — Run agents across local and remote machines
 - **CLI & HTTP API** — Full control via command line or REST endpoints
@@ -21,7 +21,8 @@ Ensemble orchestrates AI agents into collaborative teams. Out of the box it pair
 
 ### Prerequisites
 
-- Node.js 18+, Python 3.6+, [tmux](https://github.com/tmux/tmux), curl
+- Node.js 18+, Python 3.6+, curl
+- [tmux](https://github.com/tmux/tmux) — required on Linux; optional on macOS (only used as a fallback if iTerm2 is not available)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [Codex](https://github.com/openai/codex) CLIs installed
 
 ### Install & Run
@@ -137,10 +138,27 @@ curl -X POST http://localhost:23000/api/ensemble/teams \
 ## How It Works
 
 1. **Create a team** — Define agents and their task via API or CLI
-2. **Agents spawn** — Each agent gets a tmux session with the task prompt
+2. **Agents spawn** — Each agent is started by the ensemble bridge with the task prompt
 3. **Communication** — Agents use `team-say`/`team-read` scripts to exchange messages
-4. **Monitor** — Watch the collaboration unfold in real-time via the TUI monitor
+4. **Monitor** — Watch the collaboration unfold in real-time via the TUI monitor (iTerm split pane on macOS, tmux elsewhere)
 5. **Auto-disband** — When agents signal completion, results are summarized and persisted
+
+### Monitor selection
+
+`collab-launch` picks the best viewer automatically:
+
+| Situation | Monitor |
+|---|---|
+| Already inside tmux | tmux split pane (right) |
+| macOS + iTerm2, no tmux | **native iTerm2 split pane** (default) |
+| Linux, or no iTerm2 | detached tmux session (`tmux attach -t ensemble-<id>`) |
+
+Override with env vars:
+
+- `COLLAB_MONITOR=tmux\|iterm\|none` — force a specific mode (or disable the monitor)
+- `COLLAB_ITERM_MODE=split\|tab\|window` — iTerm layout (default `split`)
+
+On macOS, iTerm2 is the default — you never need `tmux attach` for the monitor.
 
 ## Configuration
 

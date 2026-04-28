@@ -10,18 +10,22 @@ nav_order: 2
 | Requirement | Why |
 |---|---|
 | **Node.js 18+** | Runtime for the ensemble server |
-| **tmux** | Agent sessions run in tmux panes |
+| **tmux** | Required on Linux for the live TUI monitor; optional on macOS (iTerm2 is used instead — see below) |
 | **Python 3.6+** | Used by collab scripts for message parsing |
 | **curl** | Used in scripts and examples |
-| **macOS or Linux** | tmux and shell scripts require a Unix environment |
+| **macOS or Linux** | Shell scripts require a Unix environment |
 | **Claude Code + Codex CLIs** | The default agent pair ([Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex)) |
 
 > **Platform support:** Ensemble runs on macOS and Linux only. Windows (including WSL) is not tested or supported.
 
-### Install tmux
+### Monitor: iTerm2 on macOS, tmux on Linux
+
+The live TUI monitor is just a viewer — on macOS it opens in a **native iTerm2 split pane** via `osascript`, so you never need to `tmux attach`. On Linux, or when no iTerm2 is present, it falls back to a tmux session. Override with `COLLAB_MONITOR=tmux|iterm|none` or `COLLAB_ITERM_MODE=split|tab|window`.
+
+### Install tmux (Linux, or macOS fallback)
 
 ```bash
-# macOS
+# macOS (optional — only if you prefer tmux over iTerm2 native splits)
 brew install tmux
 
 # Ubuntu/Debian
@@ -141,9 +145,11 @@ If you use Claude Code, the collab script wraps everything into one command:
 ./scripts/collab-launch.sh "$(pwd)" "Review the README and suggest improvements"
 ```
 
-This creates a team, starts the bridge, opens a TUI monitor, and begins the collaboration automatically.
+This creates a team, starts the bridge, opens a TUI monitor, and begins the collaboration automatically. On macOS + iTerm2 the monitor pops up in a **new iTerm split pane** automatically — you don't need to attach to anything.
 
 ### Watch it live
+
+On macOS the monitor is already visible in the iTerm split pane that `collab-launch` opened. If you need to (re)open it manually:
 
 ```bash
 # Open the TUI monitor (replace <team-id> with your actual team ID)
@@ -152,7 +158,7 @@ npx ensemble monitor <team-id>
 # Or monitor the most recent team
 npx ensemble monitor --latest
 
-# Or attach to the tmux monitor session
+# Linux / tmux fallback — attach to the detached session
 tmux attach -t ensemble-<team-id>
 ```
 

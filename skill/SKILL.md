@@ -4,7 +4,7 @@ description: Start a collaborative AI team (Codex + Claude) to work on a task to
 allowed-tools: Bash, Read, Write, Agent, TaskOutput
 metadata:
   author: michel
-  version: 6.0.0
+  version: 6.1.0
 ---
 
 # Collab: Autonomous AI Team Collaboration
@@ -27,8 +27,21 @@ All collab artifacts live in `/tmp/ensemble/<TEAM_ID>/`:
 
 ### Step 0: Detect environment
 ```bash
-if [ -n "$TMUX" ]; then echo "TMUX_YES"; else echo "TMUX_NO"; fi
+if [ -n "$TMUX" ]; then
+  echo "TMUX_YES"
+elif [ "$(uname)" = "Darwin" ] && [ "${TERM_PROGRAM:-}" = "iTerm.app" ]; then
+  echo "ITERM_NATIVE"
+else
+  echo "TMUX_NO"
+fi
 ```
+
+Three monitor modes:
+- `TMUX_YES` — already inside tmux; `collab-launch` opens a split pane right
+- `ITERM_NATIVE` — macOS iTerm2 without tmux; `collab-launch` uses `osascript` to open a native iTerm split pane (no `tmux attach` needed)
+- `TMUX_NO` — fallback: detached tmux session the user must attach to
+
+Force a specific mode with `COLLAB_MONITOR=tmux|iterm|none` or change iTerm layout with `COLLAB_ITERM_MODE=split|tab|window` (default `split`).
 
 ### Step 1: Launch the team
 ```bash
@@ -42,8 +55,9 @@ TEAM_ID=$(cat /tmp/collab-team-id.txt)
 
 ### Step 2: Tell the user where the monitor is
 
-If `TMUX_YES`: "Team is live in the right tmux pane."
-If `TMUX_NO`: "`tmux attach -t ensemble-$TEAM_ID` — live TUI monitor (steer, disband, scroll)"
+- `TMUX_YES`: "Team is live in the right tmux pane."
+- `ITERM_NATIVE`: "Team is live in the new iTerm pane on the right."
+- `TMUX_NO`: "`tmux attach -t ensemble-$TEAM_ID` — live TUI monitor (steer, disband, scroll)"
 
 ### Step 3: Monitoring — the user MUST see the conversation
 
@@ -83,6 +97,10 @@ Use markdown bold for agent names. Show the FULL message content (up to 500 char
 ```bash
 TEAM_ID="<id>" && RD="/tmp/ensemble/$TEAM_ID" && kill "$(cat "$RD/poller.pid" 2>/dev/null)" 2>/dev/null || true; kill "$(cat "$RD/bridge.pid" 2>/dev/null)" 2>/dev/null || true; tmux kill-session -t "ensemble-$TEAM_ID" 2>/dev/null || true
 ```
+
+#### If `ITERM_NATIVE`: background summary watcher
+
+Same as `TMUX_YES`: the monitor pane is visible to the user, so don't inline-poll. Wait for completion in the background (same snippet as below) and present the final summary when done. On cleanup, the iTerm pane lives on — the user closes it with `q` or Cmd+W. Do NOT try to `tmux kill-session` (no tmux session exists in this mode).
 
 #### If `TMUX_YES`: background summary watcher
 
