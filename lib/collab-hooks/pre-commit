@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# pre-commit hook installed only in collab worktrees.
+# Reads .collab-protect at the worktree root and rejects commits that touch
+# any matching path. Hard enforcement — sparring agents can't override the
+# rule by ignoring the prompt instruction.
+#
+# Patterns: gitignore-style globs, one per line, # for comments. Empty lines
+# ignored. Examples:
+#     src/components/primitives/*.tsx
+#     **/Card.tsx
+#     src/generated/**
+#
+# Bypass (operator-side, intentional): COLLAB_PROTECT_BYPASS=1 git commit ...
+# Without the env, the commit fails with exit 1 and a clear list of violations.
+set -euo pipefail
+
+if [ -n "${COLLAB_PROTECT_BYPASS:-}" ]; then
+  exit 0
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -z "$REPO_ROOT" ] && exit 0  # not a git repo (shouldn't happen pre-commit)
+
+PROTECT_FILE="$REPO_ROOT/.collab-protect"
+[ ! -f "$PROTECT_FILE" ] && exit 0  # nothing to enforce
+
+# Build glob list (skip empty + comments)
+mapfile -t PATTERNS < <(grep -vE '^\s*(#|$)' "$PROTECT_FILE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+[ "${#PATTERNS[@]}" -eq 0 ] && exit 0
+
+# Get staged files (M/A/R/C, not D — we don't block deletions)
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null)
+[ -z "$STAGED" ] && exit 0
+
+# Match each staged file against each pattern via shell pathname matching.
+# We use `case` glob match with extglob enabled so ** in patterns works.
+shopt -s globstar nullglob extglob 2>/dev/null || true
+
+VIOLATIONS=()
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  for p in "${PATTERNS[@]}"; do
+    # shellcheck disable=SC2053
+    if [[ "$f" == $p ]]; then
+      VIOLATIONS+=("$f  ←  matches \`$p\`")
+      break
+    fi
+  done
+done <<< "$STAGED"
+
+if [ "${#VIOLATIONS[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+echo ""
+echo "🔒 collab-protect: blocked commit — files matching .collab-protect:" >&2
+for v in "${VIOLATIONS[@]}"; do
+  echo "    $v" >&2
+done
+echo "" >&2
+echo "  These paths are explicitly off-limits to collab agents. Options:" >&2
+echo "    1. Reword the change to avoid the protected file" >&2
+echo "    2. Emit [BLOCKER] in team-say so the operator can lift the restriction" >&2
+echo "    3. Operator-side bypass: COLLAB_PROTECT_BYPASS=1 git commit ... (only after explicit human review)" >&2
+echo "" >&2
+exit 1

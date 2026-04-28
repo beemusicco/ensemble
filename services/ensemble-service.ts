@@ -7,7 +7,7 @@
 import { v4 as uuidv4 } from 'uuid'
 import type { EnsembleTeam, EnsembleMessage, CreateTeamRequest, CollabTemplatesFile } from '../types/ensemble'
 import {
-  createTeam, getTeam, updateTeam, loadTeams,
+  createTeam, getTeam, updateTeam, loadTeams, loadAllTeamsIncludingArchives,
   appendMessage, getMessages, getActiveTeamsByWorkingDir,
 } from '../lib/ensemble-registry'
 import {
@@ -823,6 +823,99 @@ function extractAndSaveLessons(
     }
   }
   console.log(`[Ensemble] Auto-extracted ${lessons.length} lesson(s) from team ${team.id.slice(0, 8)} → memory store`)
+
+  // Optional LLM-aided extraction. Pattern-based gets the structured stuff;
+  // LLM call captures the SUBTLE things (mid-prose realisations, "btw" notes,
+  // architectural insights). Opt-in via ENSEMBLE_LLM_LESSONS=1 — costs ~1¢
+  // per disband on Haiku.
+  if (process.env['ENSEMBLE_LLM_LESSONS'] === '1' && agentMessages.length >= 6) {
+    void runLlmLessonExtraction(team, project, lessons.length).catch(err => {
+      console.warn(`[Ensemble] LLM lesson extraction failed for ${team.id.slice(0, 8)}:`, err)
+    })
+  }
+}
+
+/**
+ * Optional LLM-aided lesson extraction. Spawns `claude -p --model haiku`
+ * with the disbanded team's last 50 agent messages and asks for 1-5 reusable
+ * lessons in JSON. Each accepted lesson is persisted via writeMemory with
+ * tag `[auto_extracted, llm_summary, <project>]`.
+ *
+ * Wrapped fully in try/catch — any failure (binary missing, Haiku unreachable,
+ * malformed JSON) is logged and dropped, never breaks disband.
+ *
+ * Cost: ~1¢ per disband (1-2k input tokens × Haiku rates). Disabled by
+ * default; set ENSEMBLE_LLM_LESSONS=1 to opt in.
+ */
+async function runLlmLessonExtraction(
+  team: { id: string; name: string; description?: string },
+  project: string | undefined,
+  patternCount: number,
+): Promise<void> {
+  const messages = getMessages(team.id)
+  const tail = messages
+    .filter(m => m.from !== 'ensemble' && m.from !== 'user')
+    .slice(-50)
+    .map(m => `[${(m.timestamp || '').slice(11, 19)}] ${m.from}: ${(m.content || '').slice(0, 600)}`)
+    .join('\n')
+  if (tail.length === 0) return
+
+  const prompt = [
+    `You are reviewing the message log of a just-disbanded multi-agent team.`,
+    `Extract 1-5 REUSABLE LESSONS for FUTURE TEAMS — things the next team`,
+    `working in the same project should know to avoid repeating mistakes.`,
+    ``,
+    `Output ONLY JSON. Schema: an array of objects, each with:`,
+    `  "key":   short slug (snake_case, ≤50 chars)`,
+    `  "value": one-line lesson body (≤300 chars), specific not generic`,
+    `  "tags":  array of 2-5 short tags (lowercase, snake_case)`,
+    ``,
+    `Rules: SKIP generic engineering platitudes ("write tests", "use types").`,
+    `Save concrete file paths, gotchas tied to this codebase, real disagreements.`,
+    `If nothing concrete found, output empty array [].`,
+    `Already-saved pattern lessons: ${patternCount}. Don't duplicate them.`,
+    ``,
+    `Team description: ${(team.description || '').slice(0, 200)}`,
+    `Last messages:`,
+    tail,
+  ].join('\n')
+
+  // Shell out to Haiku via Claude CLI. Subscription-billed, no API key needed.
+  const { stdout } = await execAsync(
+    `claude --model haiku -p ${JSON.stringify(prompt)} 2>/dev/null`,
+    { timeout: 60_000, maxBuffer: 256 * 1024 },
+  )
+  const json = stdout.trim()
+  let parsed: Array<{ key: string; value: string; tags?: string[] }>
+  try {
+    // Tolerate fenced code blocks Haiku sometimes wraps JSON in.
+    const cleaned = json.replace(/^```(?:json)?\s*|\s*```$/g, '').trim()
+    parsed = JSON.parse(cleaned)
+  } catch {
+    console.warn(`[Ensemble] LLM lessons JSON parse failed for ${team.id.slice(0, 8)} — output:`, json.slice(0, 200))
+    return
+  }
+  if (!Array.isArray(parsed)) return
+
+  const baseTags = ['auto_extracted', 'llm_summary', team.id.slice(0, 8)]
+  if (project) baseTags.push(project)
+  let saved = 0
+  for (const item of parsed.slice(0, 5)) {
+    if (!item || typeof item.key !== 'string' || typeof item.value !== 'string') continue
+    const value = item.value.trim().slice(0, 500)
+    const key = `lesson_llm_${item.key.toLowerCase().replace(/[^a-z0-9_]+/g, '_').slice(0, 40)}_${shortHash(value)}`
+    const tags = [...baseTags, ...(item.tags || []).slice(0, 5).map(t => String(t).toLowerCase().replace(/[^a-z0-9_]+/g, '_'))]
+      .filter((t, i, a) => t && a.indexOf(t) === i)
+    try {
+      writeMemory({ scope: 'global', key, value, tags, teamId: team.id })
+      saved++
+    } catch (err) {
+      console.error(`[Ensemble] LLM lesson writeMemory failed for ${key}:`, err)
+    }
+  }
+  if (saved > 0) {
+    console.log(`[Ensemble] LLM extracted ${saved} additional lesson(s) for team ${team.id.slice(0, 8)}`)
+  }
 }
 
 /**
@@ -1819,7 +1912,9 @@ export function searchHistory(
 ): ServiceResult<{ matches: HistoryMatch[]; total: number }> {
   const q = query.trim().toLowerCase()
   if (!q) return { error: 'query required', status: 400 }
-  const allTeams = loadTeams()
+  // Include archived teams in cross-time search (FIX 6) — archives are the
+  // monthly rotations created when the live registry exceeds the threshold.
+  const allTeams = loadAllTeamsIncludingArchives()
   const sorted = [...allTeams].sort((a, b) => {
     const ta = new Date(a.completedAt ?? a.createdAt ?? 0).getTime()
     const tb = new Date(b.completedAt ?? b.createdAt ?? 0).getTime()

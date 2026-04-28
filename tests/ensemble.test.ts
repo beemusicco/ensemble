@@ -1139,6 +1139,75 @@ describe('buildPromptPreview() — injection guard + completion guidance', () =>
   })
 
   // FIX 3: teams.json archive rotation when threshold exceeded
+  // FIX 6: searchHistory falls through to archive files
+  it('searchHistory finds teams that have been moved to monthly archive files', async () => {
+    const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-search-'))
+    const archDir = path.join(tmpDataDir, 'ensemble')
+    fs.mkdirSync(archDir, { recursive: true })
+    const oldDataDir = process.env.ENSEMBLE_DATA_DIR
+    process.env.ENSEMBLE_DATA_DIR = tmpDataDir
+    vi.resetModules()
+    try {
+      // Live registry: 1 active team that doesn't match the query
+      const liveTeam = {
+        id: 'live1', name: 'live', description: 'something unrelated', status: 'active',
+        agents: [], createdBy: 'x', createdAt: '2026-04-28T10:00:00Z', feedMode: 'live',
+      }
+      fs.writeFileSync(path.join(archDir, 'teams.json'), JSON.stringify([liveTeam], null, 2))
+      // Archive file: a disbanded team whose description matches "Postmark webhook"
+      const archivedTeam = {
+        id: 'arch1', name: 'archived', description: 'Postmark webhook security audit',
+        status: 'disbanded', agents: [], createdBy: 'x',
+        createdAt: '2026-03-01T10:00:00Z', completedAt: '2026-03-01T11:00:00Z', feedMode: 'live',
+      }
+      fs.writeFileSync(path.join(archDir, 'teams-archive-2026-03.json'),
+        JSON.stringify([archivedTeam], null, 2))
+
+      const { searchHistory } = await import('../services/ensemble-service')
+      const result = searchHistory('Postmark webhook', 10)
+      expect(result.error).toBeUndefined()
+      expect(result.data?.matches.length).toBeGreaterThanOrEqual(1)
+      expect(result.data?.matches.some(m => m.teamId === 'arch1')).toBe(true)
+    } finally {
+      if (oldDataDir === undefined) delete process.env.ENSEMBLE_DATA_DIR
+      else process.env.ENSEMBLE_DATA_DIR = oldDataDir
+      fs.rmSync(tmpDataDir, { recursive: true, force: true })
+      vi.resetModules()
+    }
+  })
+
+  it('loadAllTeamsIncludingArchives merges live + archive without duplicates', async () => {
+    const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-merge-'))
+    const archDir = path.join(tmpDataDir, 'ensemble')
+    fs.mkdirSync(archDir, { recursive: true })
+    const oldDataDir = process.env.ENSEMBLE_DATA_DIR
+    process.env.ENSEMBLE_DATA_DIR = tmpDataDir
+    vi.resetModules()
+    try {
+      fs.writeFileSync(path.join(archDir, 'teams.json'),
+        JSON.stringify([{ id: 'a', name: '', description: '', status: 'active', agents: [], createdBy: 'x', createdAt: '2026-04-28T10:00:00Z', feedMode: 'live' }], null, 2))
+      fs.writeFileSync(path.join(archDir, 'teams-archive-2026-02.json'),
+        JSON.stringify([
+          { id: 'b', name: '', description: '', status: 'disbanded', agents: [], createdBy: 'x', createdAt: '2026-02-15T10:00:00Z', feedMode: 'live' },
+          { id: 'a', name: '', description: 'duplicate', status: 'old', agents: [], createdBy: 'x', createdAt: '2025-12-01T10:00:00Z', feedMode: 'live' },  // collision — must be deduped
+        ], null, 2))
+      fs.writeFileSync(path.join(archDir, 'teams-archive-2026-03.json'),
+        JSON.stringify([{ id: 'c', name: '', description: '', status: 'disbanded', agents: [], createdBy: 'x', createdAt: '2026-03-15T10:00:00Z', feedMode: 'live' }], null, 2))
+
+      const { loadAllTeamsIncludingArchives } = await import('../lib/ensemble-registry')
+      const all = loadAllTeamsIncludingArchives()
+      expect(all.map(t => t.id).sort()).toEqual(['a', 'b', 'c'])
+      // The live 'a' wins on collision — status is 'active', not 'old'
+      const a = all.find(t => t.id === 'a')!
+      expect(a.status).toBe('active')
+    } finally {
+      if (oldDataDir === undefined) delete process.env.ENSEMBLE_DATA_DIR
+      else process.env.ENSEMBLE_DATA_DIR = oldDataDir
+      fs.rmSync(tmpDataDir, { recursive: true, force: true })
+      vi.resetModules()
+    }
+  })
+
   it('archives old disbanded teams when teams.json exceeds threshold', async () => {
     const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-test-'))
     const oldDataDir = process.env.ENSEMBLE_DATA_DIR

@@ -152,6 +152,40 @@ export function loadTeams(): EnsembleTeam[] {
   return withTeamsLock(() => readTeamsFile())
 }
 
+/**
+ * Load every team — live registry plus all monthly archive files. Used by
+ * cross-time search (team-history) so archived teams stay discoverable.
+ * Live teams take precedence on id collision (shouldn't happen, but safe
+ * default). Archive read is lazy: missing/unreadable archive files are
+ * skipped silently — a corrupt archive doesn't break the search path.
+ */
+export function loadAllTeamsIncludingArchives(): EnsembleTeam[] {
+  const live = loadTeams()
+  const liveIds = new Set(live.map(t => t.id))
+  const result = [...live]
+  try {
+    if (!fs.existsSync(ENSEMBLE_DIR)) return result
+    const archiveFiles = fs.readdirSync(ENSEMBLE_DIR)
+      .filter(f => f.startsWith('teams-archive-') && f.endsWith('.json'))
+    for (const f of archiveFiles) {
+      try {
+        const archived: EnsembleTeam[] = JSON.parse(
+          fs.readFileSync(path.join(ENSEMBLE_DIR, f), 'utf-8'),
+        )
+        for (const t of archived) {
+          if (!liveIds.has(t.id)) {
+            result.push(t)
+            liveIds.add(t.id)
+          }
+        }
+      } catch (err) {
+        console.warn(`[Ensemble] Failed to read archive ${f}:`, err)
+      }
+    }
+  } catch { /* directory walk failed — return live teams only */ }
+  return result
+}
+
 export function saveTeams(teams: EnsembleTeam[]): void {
   withTeamsLock(() => {
     writeTeamsFile(teams)

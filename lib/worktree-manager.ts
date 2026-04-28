@@ -19,6 +19,10 @@ export interface WorktreeInfo {
 /**
  * Create an isolated git worktree for an agent.
  * Creates a new branch `collab/<teamId>/<agentName>` from the current HEAD.
+ *
+ * Also wires the worktree's git config to point hooksPath at the bundled
+ * collab-hooks directory so the pre-commit guard for `.collab-protect`
+ * runs inside this worktree without modifying the parent repo's hooks.
  */
 export async function createWorktree(
   teamId: string,
@@ -35,6 +39,26 @@ export async function createWorktree(
   await execFileAsync('git', ['worktree', 'add', '-b', branch, worktreeDir], {
     cwd: basePath,
   })
+
+  // Install the .collab-protect pre-commit guard at the worktree level.
+  // Path is relative to this lib file; resolve at runtime so it works when
+  // the package is shipped (lib/collab-hooks/) or run from source.
+  try {
+    const hooksDir = path.resolve(__dirname, 'collab-hooks')
+    if (fs.existsSync(hooksDir) && fs.existsSync(path.join(hooksDir, 'pre-commit'))) {
+      // Make sure pre-commit is executable (might be cleared by `cp` etc.)
+      try { fs.chmodSync(path.join(hooksDir, 'pre-commit'), 0o755) } catch { /* non-fatal */ }
+      await execFileAsync('git', ['config', 'core.hooksPath', hooksDir], {
+        cwd: worktreeDir,
+      })
+      console.log(`[Worktree] Wired core.hooksPath → ${hooksDir} for ${agentName}`)
+    }
+  } catch (err) {
+    // Hook install failure must NOT abort worktree creation — without the
+    // hook the prompt-level rule is the only protection, but the worktree
+    // is still safe to use.
+    console.warn(`[Worktree] Failed to install collab-protect hook for ${agentName}:`, err)
+  }
 
   console.log(`[Worktree] Created worktree for ${agentName}: ${worktreeDir} (branch: ${branch})`)
   return { path: worktreeDir, branch, agentName }
