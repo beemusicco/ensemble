@@ -32,9 +32,10 @@ import { analyzeThinking, pruneAlreadyWarned, getCurrentPhase } from '../lib/thi
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { spawn, exec } from 'child_process'
+import { spawn, exec, execFile } from 'child_process'
 import { promisify } from 'util'
 const execAsync = promisify(exec)
+const execFileAsync = promisify(execFile)
 import { createWorktree, mergeWorktree, destroyWorktree, type WorktreeInfo } from '../lib/worktree-manager'
 import { runStagedWorkflow } from '../lib/staged-workflow'
 
@@ -835,6 +836,13 @@ function extractAndSaveLessons(
   }
 }
 
+// Module-scoped LLM circuit breaker. When the CLI returns a rate-limit /
+// usage-cap response, we set llmCooldownUntilTs so subsequent disbands skip
+// the call until the cooldown expires. Default 1h — typical Anthropic
+// subscription cap windows reset hourly or daily.
+const LLM_COOLDOWN_MS = parseInt(process.env['ENSEMBLE_LLM_COOLDOWN_MS'] ?? '', 10) || (60 * 60 * 1000)
+let llmCooldownUntilTs = 0
+
 /**
  * Optional LLM-aided lesson extraction. Spawns `claude -p --model haiku`
  * with the disbanded team's last 50 agent messages and asks for 1-5 reusable
@@ -880,11 +888,83 @@ async function runLlmLessonExtraction(
     tail,
   ].join('\n')
 
-  // Shell out to Haiku via Claude CLI. Subscription-billed, no API key needed.
-  const { stdout } = await execAsync(
-    `claude --model haiku -p ${JSON.stringify(prompt)} 2>/dev/null`,
-    { timeout: 60_000, maxBuffer: 256 * 1024 },
-  )
+  // Circuit breaker: when we see a usage-cap / rate-limit response from
+  // Anthropic, suppress further calls for COOLDOWN_MS so we don't keep
+  // hammering on every disband. Per-process state — restart clears it.
+  if (Date.now() < llmCooldownUntilTs) {
+    return
+  }
+
+  // Shell out to Haiku via Claude CLI using spawn — gives us proper stdin
+  // control (close it immediately so the CLI doesn't wait 3s for piped
+  // input) without the shell-escaping problems of exec(). Prompt passes
+  // as a literal -p arg, real newlines preserved.
+  let stdout = ''
+  let stderr = ''
+  let exitCode = 0
+  try {
+    const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve, reject) => {
+      const proc = spawn('claude', ['--model', 'haiku', '-p', prompt], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+      const chunks: Buffer[] = []
+      const errChunks: Buffer[] = []
+      let totalSize = 0
+      const MAX = 1024 * 1024
+      proc.stdout.on('data', (d: Buffer) => {
+        totalSize += d.length
+        if (totalSize <= MAX) chunks.push(d)
+      })
+      proc.stderr.on('data', (d: Buffer) => errChunks.push(d))
+      const killer = setTimeout(() => {
+        try { proc.kill('SIGTERM') } catch { /* ignore */ }
+        reject(new Error('claude CLI timed out after 90s'))
+      }, 90_000)
+      proc.on('error', err => { clearTimeout(killer); reject(err) })
+      proc.on('close', (code) => {
+        clearTimeout(killer)
+        resolve({
+          stdout: Buffer.concat(chunks).toString('utf-8'),
+          stderr: Buffer.concat(errChunks).toString('utf-8'),
+          code: code ?? 0,
+        })
+      })
+      // Close stdin immediately — we don't pipe additional content.
+      proc.stdin.end()
+    })
+    stdout = result.stdout
+    stderr = result.stderr
+    exitCode = result.code
+  } catch (err) {
+    console.warn(
+      `[Ensemble] LLM Haiku spawn failed for ${team.id.slice(0, 8)}: ${(err as Error).message ?? err}`,
+    )
+    return
+  }
+  // Detect Anthropic subscription cap / rate-limit hit. The CLI currently
+  // emits these phrases on quota exhaustion; both produce non-JSON stdout
+  // but should NOT spam logs every disband.
+  const QUOTA_MARKERS = [
+    /monthly usage limit/i,
+    /rate.?limit/i,
+    /quota/i,
+    /usage cap/i,
+  ]
+  if (QUOTA_MARKERS.some(p => p.test(stdout) || p.test(stderr))) {
+    llmCooldownUntilTs = Date.now() + LLM_COOLDOWN_MS
+    console.warn(
+      `[Ensemble] LLM extraction backing off until ${new Date(llmCooldownUntilTs).toISOString()} — Anthropic quota hit. ` +
+      `stdout=${stdout.trim().slice(0, 100)}`,
+    )
+    return
+  }
+  if (stderr.trim()) {
+    console.warn(`[Ensemble] LLM Haiku stderr for ${team.id.slice(0, 8)}: ${stderr.slice(0, 200)}`)
+  }
+  if (!stdout.trim()) {
+    console.warn(`[Ensemble] LLM Haiku returned empty stdout for ${team.id.slice(0, 8)}`)
+    return
+  }
   const json = stdout.trim()
   let parsed: Array<{ key: string; value: string; tags?: string[] }>
   try {
@@ -892,7 +972,7 @@ async function runLlmLessonExtraction(
     const cleaned = json.replace(/^```(?:json)?\s*|\s*```$/g, '').trim()
     parsed = JSON.parse(cleaned)
   } catch {
-    console.warn(`[Ensemble] LLM lessons JSON parse failed for ${team.id.slice(0, 8)} — output:`, json.slice(0, 200))
+    console.warn(`[Ensemble] LLM lessons JSON parse failed for ${team.id.slice(0, 8)} — output:`, json.slice(0, 300))
     return
   }
   if (!Array.isArray(parsed)) return
