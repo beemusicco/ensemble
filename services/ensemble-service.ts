@@ -32,7 +32,9 @@ import { analyzeThinking, pruneAlreadyWarned, getCurrentPhase } from '../lib/thi
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { spawn } from 'child_process'
+import { spawn, exec } from 'child_process'
+import { promisify } from 'util'
+const execAsync = promisify(exec)
 import { createWorktree, mergeWorktree, destroyWorktree, type WorktreeInfo } from '../lib/worktree-manager'
 import { runStagedWorkflow } from '../lib/staged-workflow'
 
@@ -171,6 +173,14 @@ class EnsembleService {
       // agents see the same feedback a human reviewer would give.
       this.runThinkingSupervisor(team.id)
 
+      // FIX 2: detect agent CLI crashes mid-flight (UserPromptSubmit hook
+      // ENOENT, OOM, manual Ctrl-C). When pane_current_command reports a
+      // shell instead of the agent's CLI, the agent process is dead and
+      // the team is operating short-handed. Mark the agent as 'failed'
+      // so monitor + stats show it correctly, post a structured warning
+      // to the team feed.
+      await this.detectCrashedAgents(team)
+
       if (this.disbandingTeams.has(team.id)) continue
       if (!this.shouldAutoDisband(team)) continue
 
@@ -185,6 +195,43 @@ class EnsembleService {
       } finally {
         this.disbandingTeams.delete(team.id)
       }
+    }
+  }
+
+  // Track which agents we've already flagged as crashed so we don't spam
+  // the team feed every 15s tick.
+  private readonly crashedAgentMarkers = new Set<string>()
+
+  private async detectCrashedAgents(team: EnsembleTeam): Promise<void> {
+    const runtime = getRuntime()
+    if (!runtime.paneCurrentCommand) return
+    const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh'])
+    const activeAgents = team.agents.filter(a => a.status === 'active')
+    for (const agent of activeAgents) {
+      // Remote agents can't be introspected from the local host; skip.
+      if (agent.hostId && !isSelf(agent.hostId)) continue
+      const markerKey = `${team.id}:${agent.name}`
+      if (this.crashedAgentMarkers.has(markerKey)) continue
+      try {
+        const sessionName = `${team.name}-${agent.name}`
+        const cmd = (await runtime.paneCurrentCommand(sessionName))
+          .toLowerCase()
+          .replace(/\.exe$/, '')
+        if (cmd && SHELLS.has(cmd)) {
+          // CLI exited; pane fell back to parent shell. Mark + warn once.
+          this.crashedAgentMarkers.add(markerKey)
+          updateTeam(team.id, {
+            agents: team.agents.map(a => a.name === agent.name ? { ...a, status: 'failed' } : a),
+          })
+          appendMessage(team.id, {
+            id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
+            content: `💀 ${agent.name} crashed — pane shows parent shell (${cmd}). The agent CLI exited (UserPromptSubmit hook error, OOM, or manual kill). Team continues with the other ${activeAgents.length - 1} agent(s); manual respawn needed if work depends on this role.`,
+            type: 'chat', timestamp: new Date().toISOString(),
+            meta: { event: 'agent_crashed', agent: agent.name, foreground: cmd },
+          })
+          console.warn(`[Ensemble] Agent crashed: team=${team.id.slice(0, 8)} agent=${agent.name} foreground=${cmd}`)
+        }
+      } catch { /* introspection failed — try next tick */ }
     }
   }
 
@@ -1597,6 +1644,61 @@ export async function disbandTeam(
         agentName: agent.name,
       }
       await destroyWorktree(worktreeInfo, basePath)
+    }
+
+    // FIX 1: surface merge conflicts as a single structured alert. Without
+    // this the operator only sees individual per-agent warnings buried in
+    // the team feed and can miss preserved branches. We post a recovery
+    // checklist + (if Telegram is configured) a push notification.
+    if (conflictedAgents.size > 0) {
+      const conflicted = team.agents.filter(a => conflictedAgents.has(a.name))
+      const recoveryLines = conflicted.map(a => {
+        const branch = a.worktreeBranch ?? 'unknown-branch'
+        return `  • ${a.name} → branch \`${branch}\`\n` +
+               `      git diff master...${branch}\n` +
+               `      git merge --no-ff ${branch}     # resolve manually OR\n` +
+               `      git cherry-pick <commit>          # pick specific changes`
+      }).join('\n')
+      const summary = [
+        `🚧 ${conflictedAgents.size} merge conflict${conflictedAgents.size === 1 ? '' : 's'} — manual resolution needed:`,
+        recoveryLines,
+        ``,
+        `All other agent worktrees merged cleanly. Branches above are preserved (NOT data loss).`,
+        `Once resolved + merged, delete with: \`git branch -D <branch>\``,
+      ].join('\n')
+      appendMessage(teamId, {
+        id: uuidv4(), teamId, from: 'ensemble', to: 'team',
+        content: summary,
+        type: 'chat', timestamp: new Date().toISOString(),
+        meta: {
+          event: 'merge_conflict_alert',
+          conflictCount: conflictedAgents.size,
+          conflictedAgents: [...conflictedAgents],
+          branches: conflicted.map(a => a.worktreeBranch).filter(Boolean),
+        },
+      })
+      // Telegram push if configured (uses existing TELEGRAM_BOT_TOKEN /
+      // TELEGRAM_CHAT_ID env vars; silently skipped otherwise).
+      if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
+        try {
+          const taskShort = (team.description || '').split('\n')[0].slice(0, 80)
+          const tgText = [
+            `🚧 *${conflictedAgents.size} merge conflict${conflictedAgents.size === 1 ? '' : 's'}* on team \`${team.id.slice(0, 8)}\``,
+            `Task: ${taskShort}`,
+            ``,
+            ...conflicted.map(a => `\`${a.worktreeBranch}\``),
+            ``,
+            `Run \`git branch --list "collab/${team.id.slice(0, 8)}*"\` to see preserved branches.`,
+          ].join('\n')
+          await execAsync(
+            `curl -s -X POST 'https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage' ` +
+            `-d 'chat_id=${TELEGRAM_CHAT_ID}' ` +
+            `-d 'parse_mode=Markdown' ` +
+            `--data-urlencode 'text=${tgText}' > /dev/null`,
+            { timeout: 5000 }
+          )
+        } catch { /* Telegram failure must never break disband */ }
+      }
     }
   }
 

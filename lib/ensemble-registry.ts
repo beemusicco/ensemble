@@ -34,9 +34,76 @@ function readTeamsFile(): EnsembleTeam[] {
   return JSON.parse(fs.readFileSync(TEAMS_FILE, 'utf-8'))
 }
 
+// Archive thresholds: when teams.json exceeds ARCHIVE_THRESHOLD entries,
+// move all 'disbanded' / 'failed' teams whose completedAt (or createdAt
+// fallback) is older than ARCHIVE_AGE_MS into a monthly archive file.
+// The active team count + last 200 disbanded stay in teams.json for fast
+// loadTeams(); team-history search reads archives on demand.
+const ARCHIVE_THRESHOLD = parseInt(process.env['ENSEMBLE_TEAMS_ARCHIVE_THRESHOLD'] ?? '500', 10) || 500
+const ARCHIVE_AGE_MS = parseInt(process.env['ENSEMBLE_TEAMS_ARCHIVE_AGE_MS'] ?? '', 10) || (7 * 24 * 60 * 60 * 1000)
+const KEEP_RECENT_DISBANDED = 200
+
+function archivePathForMonth(date: Date): string {
+  const yyyy = date.getUTCFullYear()
+  const mm = String(date.getUTCMonth() + 1).padStart(2, '0')
+  return path.join(ENSEMBLE_DIR, `teams-archive-${yyyy}-${mm}.json`)
+}
+
+function maybeArchiveTeams(teams: EnsembleTeam[]): EnsembleTeam[] {
+  if (teams.length < ARCHIVE_THRESHOLD) return teams
+  const now = Date.now()
+  const isOldDisbanded = (t: EnsembleTeam): boolean => {
+    if (t.status !== 'disbanded' && t.status !== 'failed') return false
+    const ts = t.completedAt || t.createdAt
+    const tsMs = ts ? new Date(ts).getTime() : 0
+    return Number.isFinite(tsMs) && now - tsMs > ARCHIVE_AGE_MS
+  }
+  const eligible = teams.filter(isOldDisbanded)
+  if (eligible.length === 0) return teams
+
+  // Always keep the most recent N disbanded teams in the live file so
+  // dashboards / team-history's recent-list don't immediately fall through
+  // to archives.
+  const disbandedSorted = teams
+    .filter(t => t.status === 'disbanded' || t.status === 'failed')
+    .sort((a, b) => (b.completedAt || b.createdAt).localeCompare(a.completedAt || a.createdAt))
+  const keepIds = new Set(disbandedSorted.slice(0, KEEP_RECENT_DISBANDED).map(t => t.id))
+  const toArchive = eligible.filter(t => !keepIds.has(t.id))
+  if (toArchive.length === 0) return teams
+
+  // Group archive entries by month and append (don't overwrite — multiple
+  // rotations can land in the same month).
+  const byMonth = new Map<string, EnsembleTeam[]>()
+  for (const t of toArchive) {
+    const ts = t.completedAt || t.createdAt
+    const date = new Date(ts || Date.now())
+    const archivePath = archivePathForMonth(date)
+    if (!byMonth.has(archivePath)) byMonth.set(archivePath, [])
+    byMonth.get(archivePath)!.push(t)
+  }
+  try {
+    for (const [archivePath, entries] of byMonth) {
+      let existing: EnsembleTeam[] = []
+      if (fs.existsSync(archivePath)) {
+        try { existing = JSON.parse(fs.readFileSync(archivePath, 'utf-8')) } catch { existing = [] }
+      }
+      const seen = new Set(existing.map(t => t.id))
+      const merged = existing.concat(entries.filter(t => !seen.has(t.id)))
+      fs.writeFileSync(archivePath, JSON.stringify(merged, null, 2))
+    }
+    console.log(`[Ensemble] Archived ${toArchive.length} disbanded team(s) to ${byMonth.size} monthly file(s)`)
+  } catch (err) {
+    console.error('[Ensemble] Archive write failed (keeping in live file):', err)
+    return teams
+  }
+  const archivedIds = new Set(toArchive.map(t => t.id))
+  return teams.filter(t => !archivedIds.has(t.id))
+}
+
 function writeTeamsFile(teams: EnsembleTeam[]): void {
   ensureDir(ENSEMBLE_DIR)
-  fs.writeFileSync(TEAMS_FILE, JSON.stringify(teams, null, 2))
+  const compacted = maybeArchiveTeams(teams)
+  fs.writeFileSync(TEAMS_FILE, JSON.stringify(compacted, null, 2))
 }
 
 function acquireTeamsLock(): () => void {
