@@ -83,7 +83,7 @@ describe('AgentWatchdog', () => {
       loadTeams: () => teams,
       getMessages: () => messages,
       appendMessage: (_teamId, message) => appended.push(message),
-      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: vi.fn(async () => '$ ') }),
+      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: vi.fn(async () => '$ '), paneCurrentCommand: vi.fn(async () => '') }),
       resolveAgentProgram: () => ({ inputMethod: 'sendKeys' }),
       isSelf: () => true,
       getHostById: () => undefined,
@@ -190,7 +190,8 @@ describe('AgentWatchdog', () => {
       getMessages: () => messages,
       appendMessage: (_teamId, message) => appended.push(message),
       disbandTeam,
-      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: vi.fn(async () => '$ ') }),
+      // Both agents at idle (shell visible == agent CLI exited)
+      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: vi.fn(async () => '$ '), paneCurrentCommand: vi.fn(async () => 'zsh') }),
       resolveAgentProgram: () => ({ inputMethod: 'sendKeys' }),
       isSelf: () => true,
       getHostById: () => undefined,
@@ -239,18 +240,16 @@ describe('AgentWatchdog', () => {
       makeMessage({ id: 'm2', from: 'claude-2', timestamp: '2026-03-19T10:00:00.000Z' }),
     ]
 
-    // claude-2 idle prompt visible (❯), codex-2 in middle of test output (no prompt)
-    const captureMock = vi.fn(async (session: string) => {
-      if (session.includes('codex-1')) {
-        return [
-          'PASS  tests/integration/db.test.ts  (4.2s)',
-          'PASS  tests/integration/queue.test.ts  (5.1s)',
-          'Test Suites: 12 of 24 |',
-          'Time: 142.3s',  // last line, no idle prompt
-        ].join('\n')
-      }
-      return 'some banner\n❯ '  // claude-2 at idle
-    })
+    // claude-2 idle (CLI prompt), codex-1 has agent CLI running (codex)
+    const captureMock = vi.fn(async () => 'irrelevant — paneCurrentCommand is the primary signal')
+    const paneCurrentCommandMock = vi.fn(async (session: string) =>
+      session.includes('codex-1') ? 'codex' : 'claude'  // both still alive
+    )
+    // Override one to be at idle so we can test partial busy state
+    paneCurrentCommandMock.mockImplementationOnce(async () => 'codex')  // first poll
+    paneCurrentCommandMock.mockImplementation(async (session: string) =>
+      session.includes('codex-1') ? 'codex' : 'claude'  // codex-1 still running its CLI
+    )
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
@@ -259,7 +258,7 @@ describe('AgentWatchdog', () => {
       getMessages: () => messages,
       appendMessage: (_teamId, message) => appended.push(message),
       disbandTeam,
-      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: captureMock }),
+      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: captureMock, paneCurrentCommand: paneCurrentCommandMock }),
       resolveAgentProgram: () => ({ inputMethod: 'sendKeys' }),
       isSelf: () => true,
       getHostById: () => undefined,
@@ -301,16 +300,16 @@ describe('AgentWatchdog', () => {
       makeMessage({ id: 'm1', from: 'codex-1', timestamp: '2026-03-19T10:00:00.000Z' }),
       makeMessage({ id: 'm2', from: 'claude-2', timestamp: '2026-03-19T10:00:00.000Z' }),
     ]
-    // Both agents' CLIs have exited — only the parent zsh prompt remains
-    const captureMock = vi.fn(async (session: string) =>
-      `Resume this session with: claude --resume X\naimusic@dash ${session} %`)
+    // Both agents' CLIs have exited — pane_current_command reports zsh.
+    // capturePane is irrelevant because paneCurrentCommand is the primary signal.
+    const captureMock = vi.fn(async () => 'irrelevant')
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const watchdog = new AgentWatchdog({
       loadTeams: () => teams,
       getMessages: () => messages,
       appendMessage: (_teamId, message) => appended.push(message),
       disbandTeam,
-      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: captureMock }),
+      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: captureMock, paneCurrentCommand: vi.fn(async () => 'zsh') }),
       resolveAgentProgram: () => ({ inputMethod: 'sendKeys' }),
       isSelf: () => true,
       getHostById: () => undefined,
@@ -354,7 +353,8 @@ describe('AgentWatchdog', () => {
       getMessages: () => messages,
       appendMessage: (_teamId, message) => appended.push(message),
       disbandTeam,
-      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: captureMock }),
+      // CLIs idle — paneCurrentCommand returns the shell (so disband proceeds).
+      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: captureMock, paneCurrentCommand: vi.fn(async () => 'zsh') }),
       resolveAgentProgram: () => ({ inputMethod: 'sendKeys' }),
       isSelf: () => true,
       getHostById: () => undefined,

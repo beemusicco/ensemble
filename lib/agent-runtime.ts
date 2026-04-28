@@ -64,6 +64,14 @@ export interface AgentRuntime {
   sendKeys(name: string, keys: string, opts?: { literal?: boolean; enter?: boolean }): Promise<void>
   pasteFromFile(name: string, filePath: string): Promise<void>
   capturePane(name: string, lines?: number): Promise<string>
+  /**
+   * The foreground command of the session's first pane (tmux's
+   * `#{pane_current_command}`). Returns the executable basename
+   * (e.g. `claude`, `codex`, `claude.exe`, `zsh`, `bash`). Empty string if
+   * the session does not exist or the query fails. Used by the watchdog to
+   * distinguish "agent CLI running" from "agent died, parent shell remains."
+   */
+  paneCurrentCommand(name: string): Promise<string>
 
   // Environment
   setEnvironment(name: string, key: string, value: string): Promise<void>
@@ -278,6 +286,19 @@ export class TmuxRuntime implements AgentRuntime {
         { encoding: 'utf8', timeout: 3000, shell: '/bin/bash' }
       )
       return stdout
+    } catch {
+      return ''
+    }
+  }
+
+  async paneCurrentCommand(name: string): Promise<string> {
+    try {
+      const sName = this.sanitizeName(name)
+      const { stdout } = await execAsync(
+        `tmux display-message -p -t "${sName}" '#{pane_current_command}'`,
+        { encoding: 'utf8', timeout: 2000, shell: '/bin/bash' }
+      )
+      return stdout.trim()
     } catch {
       return ''
     }

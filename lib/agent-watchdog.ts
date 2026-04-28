@@ -219,7 +219,7 @@ interface AgentWatchdogDeps {
   getMessages: (teamId: string) => EnsembleMessage[]
   appendMessage: (teamId: string, message: EnsembleMessage) => void
   disbandTeam?: (teamId: string, reason: string) => Promise<void>
-  getRuntime: () => Pick<AgentRuntime, 'sendKeys' | 'pasteFromFile' | 'capturePane'>
+  getRuntime: () => Pick<AgentRuntime, 'sendKeys' | 'pasteFromFile' | 'capturePane' | 'paneCurrentCommand'>
   resolveAgentProgram: (program: string) => { inputMethod: 'pasteFromFile' | 'sendKeys' }
   isSelf: (hostId?: string) => boolean
   getHostById: (hostId: string) => { url: string } | undefined
@@ -591,34 +591,56 @@ export class AgentWatchdog {
    */
   private async anyAgentRunningLongCommand(team: EnsembleTeam): Promise<boolean> {
     const runtime = this.deps.getRuntime()
-    if (!runtime.capturePane) return false
     const activeAgents = team.agents.filter(a => a.status === 'active')
+
+    // Shells we recognize as "agent process exited, parent shell visible" —
+    // i.e. the agent is dead and the disband should proceed. Anything outside
+    // this set (claude, claude.exe, codex, sonnet, haiku, aider, gemini,
+    // opencode, python, node, ...) is treated as "agent CLI still running"
+    // and the disband defers.
+    const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh'])
+
     for (const agent of activeAgents) {
       // Remote agents — we can't introspect their pane. Default-defer is too
       // permissive (would never disband remote teams), so default to "not
       // busy" for remote and let the local-only check decide.
       if (agent.hostId && !this.deps.isSelf(agent.hostId)) continue
+      const sessionName = `${team.name}-${agent.name}`
+
+      // Primary signal: tmux #{pane_current_command} tells us EXACTLY which
+      // foreground process is in the pane. No regex on output content, so a
+      // "85%" or "100% complete" string in agent output can't false-positive
+      // as "idle prompt visible". Switched 2026-04-28 after the % regex caused
+      // operator concern about premature disband.
+      if (runtime.paneCurrentCommand) {
+        try {
+          const cmd = (await runtime.paneCurrentCommand(sessionName))
+            .toLowerCase()
+            .replace(/\.exe$/, '')
+          if (cmd && !SHELLS.has(cmd)) {
+            // Agent CLI (claude/codex/etc.) is the foreground process →
+            // it's running something, defer the disband.
+            return true
+          }
+          // Empty cmd → query failed or session gone; fall through to the
+          // capture-pane fallback below.
+          if (cmd) continue
+        } catch { /* fall through */ }
+      }
+
+      // Fallback (older runtimes / query failure): inspect the pane content.
+      // Conservative regex — only the agent CLIs' prompts, not bare %, since
+      // % can appear in legitimate output mid-work.
+      if (!runtime.capturePane) continue
       try {
-        const sessionName = `${team.name}-${agent.name}`
         const tail = await runtime.capturePane(sessionName, 8)
-        // Idle markers — present when the agent CLI (Claude/Codex/Sonnet/
-        // Haiku/...) is waiting for input OR when it has exited and only
-        // the parent shell prompt is left. Either way the pane is NOT
-        // running a long command and the disband should proceed.
-        //  - ❯  Claude/Sonnet/Haiku CLI prompt
-        //  - ›  Codex CLI prompt
-        //  - >  generic prompt
-        //  - %  zsh prompt — added 2026-04-28 after team 86db468a zombied:
-        //       Claude CLI exited, leaving "aimusic@host ... %" at pane bottom.
-        //       The old regex missed % so the watchdog kept deferring the
-        //       all-stalled disband forever.
-        //  - $  bash/sh prompt
-        //  - #  root prompt
         const lines = tail.split('\n').map(l => l.trimEnd()).filter(l => l.length > 0)
         const lastLines = lines.slice(-4).join('\n')
-        const idle = /[❯›>%](?:\s|$)|\$ ?$|# ?$/.test(lastLines)
-        if (!idle) return true   // not at idle prompt → command running
-      } catch { /* capture failed → assume idle, fall through */ }
+        // Match real agent prompts only; shell prompts ($/#/%) handled above
+        // via paneCurrentCommand. > kept because some TUI hosts use it.
+        const idle = /[❯›>](?:\s|$)/.test(lastLines)
+        if (!idle) return true
+      } catch { /* fall through */ }
     }
     return false
   }
