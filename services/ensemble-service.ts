@@ -82,8 +82,10 @@ const LOW_CONFIDENCE_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_LOW_CONF_IDLE_MS',
 // where claude-1+codex-2 explicitly declared "team stays alive for human
 // cherry-pick" and went silent.
 const MAX_TEAM_LIFETIME_MS = parseEnvMs('ENSEMBLE_MAX_TEAM_LIFETIME_MS', 90 * 60 * 1000)
-// Patterns that signal "we're not going to call team-done" — short-circuits
-// the lifetime check earlier when matched (e.g. 30 min instead of 90).
+// Patterns that signal "we're not going to call team-done" — agents have
+// explicitly chosen to stop emitting messages. There's no benefit to waiting
+// — they won't produce more work, the user does the next step out-of-band.
+// Short idle threshold: just enough time for an in-flight last edit to land.
 const STANDING_BY_PATTERNS = [
   /\bstand(?:s|ing)?\s+by\s+silently\b/i,
   /\bteam\s+stays\s+alive\b/i,
@@ -91,7 +93,7 @@ const STANDING_BY_PATTERNS = [
   /\bgoing\s+silent\b/i,
   /\bclosing\s+loop,\s*going\s+silent\b/i,
 ]
-const STANDING_BY_IDLE_MS = parseEnvMs('ENSEMBLE_STANDING_BY_IDLE_MS', 30 * 60 * 1000)
+const STANDING_BY_IDLE_MS = parseEnvMs('ENSEMBLE_STANDING_BY_IDLE_MS', 3 * 60 * 1000)
 
 // FIX 1: bracket tag must occupy a message edge to count as a sign-off. The
 // start anchor only allows whitespace before the tag (so "[DONE]" or "  [DONE]

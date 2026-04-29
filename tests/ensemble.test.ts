@@ -555,8 +555,8 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
   it('disbands "standing by silently" teams after STANDING_BY_IDLE_MS even when CLI processes are alive', async () => {
     const createdTs = new Date(Date.now() - 50 * 60 * 1000).toISOString()  // 50 min old (under 90min cap)
     const team = makeTeam({ createdAt: createdTs })
-    // Last agent message 35 min ago — past STANDING_BY_IDLE_MS (30 min)
-    const idleTs = new Date(Date.now() - 35 * 60 * 1000).toISOString()
+    // Last agent message 5 min ago — past STANDING_BY_IDLE_MS (3 min default)
+    const idleTs = new Date(Date.now() - 5 * 60 * 1000).toISOString()
     const messages: EnsembleMessage[] = [
       makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'I will not call team-done. Team stays alive for human cherry-pick.', timestamp: idleTs }),
       makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Aligned, going silent. Team stays alive.', timestamp: idleTs }),
@@ -570,8 +570,8 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
   it('does NOT disband on standing-by markers when team is still actively messaging (idle < threshold)', async () => {
     const createdTs = new Date(Date.now() - 40 * 60 * 1000).toISOString()
     const team = makeTeam({ createdAt: createdTs })
-    // Last message 5 min ago — well under 30min standing-by idle threshold
-    const recentTs = new Date(Date.now() - 5 * 60 * 1000).toISOString()
+    // Last message 1 min ago — well under 3min standing-by idle threshold
+    const recentTs = new Date(Date.now() - 60 * 1000).toISOString()
     const messages: EnsembleMessage[] = [
       makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Team stays alive while I patch X.', timestamp: recentTs }),
       makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'still going', timestamp: recentTs }),
