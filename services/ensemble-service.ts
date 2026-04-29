@@ -36,7 +36,7 @@ import { spawn, exec, execFile } from 'child_process'
 import { promisify } from 'util'
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
-import { createWorktree, mergeWorktree, destroyWorktree, type WorktreeInfo } from '../lib/worktree-manager'
+import { createWorktree, mergeWorktree, destroyWorktree, uncommittedChanges, type WorktreeInfo } from '../lib/worktree-manager'
 import { runStagedWorkflow } from '../lib/staged-workflow'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -83,9 +83,11 @@ const LOW_CONFIDENCE_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_LOW_CONF_IDLE_MS',
 // cherry-pick" and went silent.
 const MAX_TEAM_LIFETIME_MS = parseEnvMs('ENSEMBLE_MAX_TEAM_LIFETIME_MS', 90 * 60 * 1000)
 // Patterns that signal "we're not going to call team-done" — agents have
-// explicitly chosen to stop emitting messages. There's no benefit to waiting
-// — they won't produce more work, the user does the next step out-of-band.
-// Short idle threshold: just enough time for an in-flight last edit to land.
+// explicitly chosen to stop emitting messages. With uncommitted-work
+// preservation now in disbandTeam (worktrees with local changes survive
+// the destroy), there's no longer a strong reason to keep the team open;
+// agents who said "silent" really mean it. 10 min default leaves room
+// for one belated follow-up message before we close.
 const STANDING_BY_PATTERNS = [
   /\bstand(?:s|ing)?\s+by\s+silently\b/i,
   /\bteam\s+stays\s+alive\b/i,
@@ -93,7 +95,7 @@ const STANDING_BY_PATTERNS = [
   /\bgoing\s+silent\b/i,
   /\bclosing\s+loop,\s*going\s+silent\b/i,
 ]
-const STANDING_BY_IDLE_MS = parseEnvMs('ENSEMBLE_STANDING_BY_IDLE_MS', 3 * 60 * 1000)
+const STANDING_BY_IDLE_MS = parseEnvMs('ENSEMBLE_STANDING_BY_IDLE_MS', 10 * 60 * 1000)
 
 // FIX 1: bracket tag must occupy a message edge to count as a sign-off. The
 // start anchor only allows whitespace before the tag (so "[DONE]" or "  [DONE]
@@ -1907,6 +1909,10 @@ export async function disbandTeam(
       })
     }
 
+    // Track agents whose worktrees are PRESERVED — either due to merge
+    // conflicts (existing path) or due to uncommitted local work (new
+    // path). Both cases need the operator's attention before we destroy.
+    const preservedForUncommitted = new Map<string, string>()  // agentName → porcelain output
     for (const agent of agentsWithWorktrees) {
       if (conflictedAgents.has(agent.name)) {
         console.warn(`[Ensemble] Skipping worktree destroy for ${agent.name} — merge had conflicts, branch preserved`)
@@ -1917,7 +1923,53 @@ export async function disbandTeam(
         branch: agent.worktreeBranch!,
         agentName: agent.name,
       }
+      // Check for uncommitted state BEFORE destroy — agents sometimes leave
+      // local tweaks they intend to hand off ("standing-by-silently" pattern
+      // observed on 69db6548). We preserve those instead of silently nuking.
+      const uncommitted = await uncommittedChanges(worktreeInfo.path)
+      if (uncommitted) {
+        preservedForUncommitted.set(agent.name, uncommitted)
+        console.warn(`[Ensemble] Preserving worktree for ${agent.name} — uncommitted local changes detected`)
+        continue
+      }
       await destroyWorktree(worktreeInfo, basePath)
+    }
+
+    // Surface uncommitted-work preservation as a structured alert with
+    // recovery commands. Mirrors the merge-conflict alert design (commit
+    // dc3c898) so the operator has one consistent place to look.
+    if (preservedForUncommitted.size > 0) {
+      const recoveryLines: string[] = []
+      for (const [name, porcelain] of preservedForUncommitted) {
+        const agent = team.agents.find(a => a.name === name)
+        const wpath = agent?.worktreePath ?? '(unknown path)'
+        const branch = agent?.worktreeBranch ?? '(unknown branch)'
+        const fileLines = porcelain.split('\n').slice(0, 5).map(l => `        ${l}`).join('\n')
+        const more = porcelain.split('\n').length > 5 ? `\n        … (${porcelain.split('\n').length - 5} more)` : ''
+        recoveryLines.push(
+          `  • ${name} → \`${wpath}\`\n` +
+          `      branch: \`${branch}\`\n` +
+          `      uncommitted:\n${fileLines}${more}\n` +
+          `      review:  cd ${wpath} && git diff && git status\n` +
+          `      decide:  git stash  OR  git add -A && git commit  OR  git checkout -- .  (discard)\n` +
+          `      cleanup: git worktree remove ${wpath}     # when done`
+        )
+      }
+      appendMessage(teamId, {
+        id: uuidv4(), teamId, from: 'ensemble', to: 'team',
+        content: [
+          `📦 ${preservedForUncommitted.size} worktree${preservedForUncommitted.size === 1 ? '' : 's'} preserved with uncommitted local changes:`,
+          ...recoveryLines,
+          ``,
+          `These were NOT destroyed because the agent left local edits. Review and stash/commit/discard, then remove the worktree.`,
+        ].join('\n'),
+        type: 'chat', timestamp: new Date().toISOString(),
+        meta: {
+          event: 'worktree_uncommitted_preserved',
+          count: preservedForUncommitted.size,
+          agents: [...preservedForUncommitted.keys()],
+        },
+      })
     }
 
     // FIX 1: surface merge conflicts as a single structured alert. Without

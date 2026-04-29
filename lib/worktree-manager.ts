@@ -125,6 +125,29 @@ export async function mergeWorktree(
 }
 
 /**
+ * Check whether a worktree has uncommitted work (modified, staged, or
+ * untracked files). Used by the disband path to preserve worktrees agents
+ * left in an in-flight state instead of silently nuking their changes.
+ *
+ * Returns the porcelain output trimmed (empty string = fully clean).
+ */
+export async function uncommittedChanges(worktreePath: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['status', '--porcelain'],
+      { cwd: worktreePath },
+    )
+    return stdout.trim()
+  } catch {
+    // If we can't run git status, conservatively say "no uncommitted" so the
+    // disband path doesn't get blocked. Real failures land in the destroy
+    // step's existing error path.
+    return ''
+  }
+}
+
+/**
  * Remove a worktree and optionally delete its branch.
  */
 export async function destroyWorktree(
