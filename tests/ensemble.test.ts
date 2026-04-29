@@ -1033,6 +1033,37 @@ describe('buildPromptPreview() — injection guard + completion guidance', () =>
     }
   })
 
+  // Bulletproof gate appears in EVERY prompt, regardless of mode/template
+  it.each(['normal', 'rigorous', 'sparring'] as const)(
+    'BULLETPROOF GATE block appears in all challenge modes (%s)',
+    async (mode) => {
+      const { buildPromptPreview } = await import('../services/ensemble-service')
+      const prompt = buildPromptPreview({
+        teamId: 't1', teamName: 'team-x', description: 'task',
+        agentName: 'codex-1', teammateNames: ['claude-2'], agentIndex: 0,
+        challengeMode: mode,
+      })
+      expect(prompt).toContain('BULLETPROOF GATE')
+      expect(prompt).toContain('All tests pass')
+      expect(prompt).toContain('Edge cases:')
+      expect(prompt).toContain('Revert plan:')
+      expect(prompt).toContain('High-risk paths')
+    }
+  )
+
+  it('LEARN-ON-DEMAND block appears in every prompt with the three tags', async () => {
+    const { buildPromptPreview } = await import('../services/ensemble-service')
+    const prompt = buildPromptPreview({
+      teamId: 't1', teamName: 'team-x', description: 'task',
+      agentName: 'codex-1', teammateNames: ['claude-2'], agentIndex: 0,
+    })
+    expect(prompt).toContain('LEARN-ON-DEMAND')
+    expect(prompt).toContain('[UNKNOWN:')
+    expect(prompt).toContain('[ASSUMPTION:')
+    expect(prompt).toContain('[QUESTION:')
+    expect(prompt).toContain('Anti-sycophancy')
+  })
+
   it('omits PROTECTED FILES block when no .collab-protect exists', async () => {
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'no-protect-'))
     try {
@@ -1185,6 +1216,81 @@ describe('buildPromptPreview() — injection guard + completion guidance', () =>
   })
 
   // FIX 3: teams.json archive rotation when threshold exceeded
+  // SEMANTIC retrieval: task-description-aware memory ranking
+  it('queryMemoriesSemantic returns memories most relevant to the task description', async () => {
+    const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'semantic-test-'))
+    const oldDataDir = process.env.ENSEMBLE_DATA_DIR
+    process.env.ENSEMBLE_DATA_DIR = tmpDataDir
+    vi.resetModules()
+    try {
+      const { writeMemory, queryMemoriesSemantic } = await import('../lib/memory-store')
+      // Seed 4 lessons of varying relevance to a hypothetical task about
+      // WebSocket reconnect bugs. Recency is varied so the test proves
+      // semantic similarity wins over recency.
+      writeMemory({ scope: 'global', key: 'lesson_redis_pool', value: 'Redis connection pool leaks under high load — set max_connections=200',
+                    tags: ['redis', 'pool', 'leak'] })
+      writeMemory({ scope: 'global', key: 'lesson_useSSE_reconnect', value: 'src/hooks/useSSE.jsx:21 reconnect bug — addEventListener never reattached on second connect, positions panel goes blank',
+                    tags: ['useSSE', 'reconnect', 'frontend', 'websocket'] })
+      writeMemory({ scope: 'global', key: 'lesson_alembic_head', value: 'Postgres alembic must be at head before app starts',
+                    tags: ['postgres', 'alembic', 'startup'] })
+      writeMemory({ scope: 'global', key: 'lesson_dashboard_websocket_reconnect', value: 'Dashboard websocket reconnect needs exponential backoff, current naive setTimeout causes thundering herd',
+                    tags: ['websocket', 'reconnect', 'dashboard', 'backoff'] })
+
+      const results = queryMemoriesSemantic(
+        'fix WebSocket reconnect issue in dashboard — connection drops cause blank panel',
+        { scope: 'global', limit: 5 },
+      )
+      // Top 2 should be the websocket-related lessons; the redis/alembic ones
+      // should rank lower.
+      expect(results.length).toBeGreaterThanOrEqual(2)
+      const topKeys = results.slice(0, 2).map(r => r.key)
+      expect(topKeys).toContain('lesson_useSSE_reconnect')
+      expect(topKeys).toContain('lesson_dashboard_websocket_reconnect')
+      // Ensure scores are in descending order
+      for (let i = 1; i < results.length; i++) {
+        expect(results[i - 1].score).toBeGreaterThanOrEqual(results[i].score)
+      }
+      // Redis lesson (no semantic overlap) should have very low score or be dropped
+      const redis = results.find(r => r.key === 'lesson_redis_pool')
+      if (redis) expect(redis.score).toBeLessThan(results[0].score)
+    } finally {
+      if (oldDataDir === undefined) delete process.env.ENSEMBLE_DATA_DIR
+      else process.env.ENSEMBLE_DATA_DIR = oldDataDir
+      fs.rmSync(tmpDataDir, { recursive: true, force: true })
+      vi.resetModules()
+    }
+  })
+
+  it('queryMemoriesSemantic respects project tag filtering', async () => {
+    const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'semantic-tag-'))
+    const oldDataDir = process.env.ENSEMBLE_DATA_DIR
+    process.env.ENSEMBLE_DATA_DIR = tmpDataDir
+    vi.resetModules()
+    try {
+      const { writeMemory, queryMemoriesSemantic } = await import('../lib/memory-store')
+      writeMemory({ scope: 'global', key: 'crypto_strategy', value: 'SCALP_PERP_BASIS_FADE strategy edge requires liquidity_tier filter',
+                    tags: ['crypto-trading-platform', 'iron_law'] })
+      writeMemory({ scope: 'global', key: 'libro_strategy', value: 'Postmark webhook signature must use Basic Auth, NOT HMAC — discovered during pentest',
+                    tags: ['accounting-helper', 'postmark'] })
+
+      // Task is about libro auth — but query without project filter would
+      // return crypto match if "strategy" overlaps. With excludeTags, only
+      // libro-tagged memory wins.
+      const results = queryMemoriesSemantic(
+        'audit Postmark webhook authentication and signature flow',
+        { scope: 'global', tags: ['accounting-helper', 'postmark'],
+          excludeTags: ['crypto-trading-platform', 'iron_law'], limit: 5 },
+      )
+      expect(results.length).toBe(1)
+      expect(results[0].key).toBe('libro_strategy')
+    } finally {
+      if (oldDataDir === undefined) delete process.env.ENSEMBLE_DATA_DIR
+      else process.env.ENSEMBLE_DATA_DIR = oldDataDir
+      fs.rmSync(tmpDataDir, { recursive: true, force: true })
+      vi.resetModules()
+    }
+  })
+
   // FIX 6: searchHistory falls through to archive files
   it('searchHistory finds teams that have been moved to monthly archive files', async () => {
     const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-search-'))

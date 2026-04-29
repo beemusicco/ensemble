@@ -25,7 +25,7 @@ import {
   collabRuntimeDir, collabFinishedMarker, collabBridgePosted,
   collabBridgeResult, ensureCollabDirs, collabMessagesFile,
 } from '../lib/collab-paths'
-import { queryMemories, writeMemory } from '../lib/memory-store'
+import { queryMemories, queryMemoriesSemantic, writeMemory } from '../lib/memory-store'
 import { appendCostEntry } from '../lib/cost-ledger'
 import { startSpan, endSpan } from '../lib/tracer'
 import { analyzeThinking, pruneAlreadyWarned, getCurrentPhase } from '../lib/thinking-phases'
@@ -680,6 +680,50 @@ function sanitizeTaskDescription(raw: string): string {
  * output, concrete counter-proposals), so dialing this up doesn't trip
  * triangular-chatter detection.
  */
+/**
+ * Bulletproof gate — applied across all modes when present. Defines the
+ * minimum verification floor before any [VERIFY_DONE] sign-off can hold.
+ * Auto-runner mechanically enforces test/lint gates; agent attestations
+ * carry concrete file:line evidence (cannot be hand-waved).
+ *
+ * Per-project tunable via <repo>/.collab-bulletproof.json — when absent,
+ * the default checklist below applies.
+ */
+function buildBulletproofBlock(): string {
+  return [
+    `🛡️ BULLETPROOF GATE — every [VERIFY_DONE] requires ALL of:`,
+    `  1. ✅ All tests pass (auto-run by ensemble before disband)`,
+    `  2. ✅ All linters/typecheck clean (auto-run)`,
+    `  3. ✅ No new TODO/FIXME without one-line justification (diff-checked)`,
+    `  4. 🤝 Edge cases: list 3+ with file:line citations`,
+    `  5. 🤝 Revert plan: one line "to undo, do X"`,
+    `  6. 🤝 Observability: log/metric added if behavior changed (or note "no observable change")`,
+    `  7. 📱 High-risk paths (auth/payment/db migrations) → human approval before disband`,
+    ``,
+    `Hand-waved attestations ("looks good", "should work") are REJECTED.`,
+    `Auto-FIX iterates up to 2× on any FAIL. After 2 fails → escalation, no disband.`,
+    `---`,
+  ].join('\n')
+}
+
+/**
+ * Learn-on-demand block — gives agents an explicit escape hatch from
+ * hallucination. When stuck, they emit a tagged message; the operator
+ * (or a future ensemble watcher) can fetch the answer and inject it back.
+ */
+function buildLearnOnDemandBlock(teamId: string, agentName: string): string {
+  return [
+    `🧭 LEARN-ON-DEMAND — when you don't know something, do not guess:`,
+    `  • [UNKNOWN: <concept>]   — ensemble fetches docs / past memories / web`,
+    `  • [ASSUMPTION: <claim>]  — flagged for verification; if false, your work is REJECTED`,
+    `  • [QUESTION: <ask>]      — routed to operator via Telegram (5min timeout)`,
+    ``,
+    `Use these tags inline in team-say. Better to flag uncertainty than ship hallucination.`,
+    `Anti-sycophancy: replies starting with "you're right" without evidence are flagged. Either cite file:line / output OR add [ACK_NO_EVIDENCE].`,
+    `---`,
+  ].join('\n')
+}
+
 function buildChallengeBlock(mode: 'normal' | 'rigorous' | 'sparring'): string {
   if (mode === 'normal') return ''
   // Both rigorous and sparring tail with the SAME intermediate-commit
@@ -1155,39 +1199,63 @@ export function buildPromptPreview(params: {
   // Now: prefer memories explicitly tagged with the current project; pad
   // the remainder with truly project-agnostic memories (no cross-project
   // tag); exclude memories tagged with OTHER known projects.
+  // FIX: SEMANTIC memory retrieval. Replaces tag-only filter with hybrid
+  // Jaccard + IDF scoring against the task description. The old top-5-by-
+  // recency approach surfaced random recent libro memories regardless of
+  // whether they were relevant to "fix WebSocket reconnect bug". Now the
+  // system pulls top-5 most semantically similar to THIS task.
   let memoriesBlock = ''
   try {
     const project = currentProjectFromCwd(params.workingDirectory)
-    let chosen = [] as ReturnType<typeof queryMemories>
+    let chosen = [] as Array<{ key: string; value: string; tags: string[] }>
     if (project) {
-      // Primary lookup: any of the project's domain tags. queryMemories does
-      // OR semantics on the tag filter, so this catches memories tagged with
-      // the canonical project name OR domain-specific tags (iron_law,
-      // postmark, etc.) — both are valid project signals.
+      // Build tag filter (project's domain tags) + exclude-other-projects list.
       const projectTags = PROJECT_DOMAIN_TAGS[project]
-      const tagList = projectTags ? Array.from(projectTags) : [project]
-      const tagged = queryMemories({ scope: 'global', tags: tagList, limit: 5 })
-      chosen = tagged
-      const remaining = 5 - tagged.length
+      const includeTags = projectTags ? Array.from(projectTags) : [project]
+      const otherProjectTags: string[] = []
+      for (const [otherProject, tags] of Object.entries(PROJECT_DOMAIN_TAGS)) {
+        if (otherProject === project) continue
+        for (const t of tags) {
+          if (!includeTags.includes(t)) otherProjectTags.push(t)
+        }
+      }
+      // Semantic match against project-tagged candidates first.
+      const semantic = queryMemoriesSemantic(params.description || '', {
+        scope: 'global',
+        tags: includeTags,
+        excludeTags: otherProjectTags,
+        pool: 200,
+        limit: 5,
+      })
+      chosen = semantic
+      // If too few hits, pad with recency-based generic memories (no
+      // cross-project tags).
+      const remaining = 5 - chosen.length
       if (remaining > 0) {
         const pool = queryMemories({ scope: 'global', limit: 50 })
-        const taggedIds = new Set(tagged.map(t => t.id))
+        const chosenIds = new Set(chosen.map(t => (t as { id?: string }).id))
         const generic = pool.filter(m =>
-          !taggedIds.has(m.id) && !isTaggedWithDifferentProject(m, project)
+          !chosenIds.has(m.id) && !isTaggedWithDifferentProject(m, project)
         )
-        chosen = [...tagged, ...generic.slice(0, remaining)]
+        chosen = [...chosen, ...generic.slice(0, remaining)]
       }
     } else {
-      // No project context (e.g. cwd outside known roots) → fall back to
-      // the original global query.
-      chosen = queryMemories({ scope: 'global', limit: 5 })
+      // Unknown project — semantic across the whole store.
+      chosen = queryMemoriesSemantic(params.description || '', {
+        scope: 'global',
+        pool: 200,
+        limit: 5,
+      })
+      if (chosen.length === 0) {
+        chosen = queryMemories({ scope: 'global', limit: 5 })
+      }
     }
     if (chosen.length) {
       const lines = chosen.map(m => {
         const tags = m.tags.length ? ` [${m.tags.join(',')}]` : ''
         return `  - ${m.key}${tags}: ${m.value.slice(0, 200)}`
       }).join('\n')
-      memoriesBlock = `TEAM MEMORIES (from past sessions — apply when relevant):\n${lines}\n---\n`
+      memoriesBlock = `TEAM MEMORIES (semantically matched to your task — apply when relevant):\n${lines}\n---\n`
     }
   } catch {
     memoriesBlock = ''
@@ -1253,10 +1321,18 @@ export function buildPromptPreview(params: {
     `---`,
   ].join('\n')
 
+  // Bulletproof gate + learn-on-demand: always present. Agents see them
+  // alongside expert + challenge culture so the verification floor and
+  // hallucination escape hatches are visible from message #1.
+  const bulletproofBlock = buildBulletproofBlock()
+  const learnOnDemandBlock = buildLearnOnDemandBlock(params.teamId, params.agentName)
+
   return [
     memoriesBlock,
     expertBlock,
     challengeBlock,
+    bulletproofBlock,
+    learnOnDemandBlock,
     protectBlock,
     `You are ${params.agentName} in team "${params.teamName}" with teammate ${params.teammateNames.join(', ')}.`,
     `Task: ${safeDescription}`,
