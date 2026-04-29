@@ -74,6 +74,25 @@ function parseEnvMs(name: string, fallback: number): number {
 const SINGLE_SIGNAL_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_SINGLE_SIGNAL_IDLE_MS', 600_000)
 const LOW_CONFIDENCE_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_LOW_CONF_IDLE_MS', 1_800_000)
 
+// Max team lifetime — defensive cap. Some teams agree to "stand by silently"
+// instead of calling team-done.sh, leaving the registry pinned to 'active'
+// indefinitely and the user's Claude Code window blocked on the .finished
+// watcher. After this window the team is force-disbanded with a clear
+// reason. Default 90 min; set to 0 to disable. Observed in team 69db6548
+// where claude-1+codex-2 explicitly declared "team stays alive for human
+// cherry-pick" and went silent.
+const MAX_TEAM_LIFETIME_MS = parseEnvMs('ENSEMBLE_MAX_TEAM_LIFETIME_MS', 90 * 60 * 1000)
+// Patterns that signal "we're not going to call team-done" — short-circuits
+// the lifetime check earlier when matched (e.g. 30 min instead of 90).
+const STANDING_BY_PATTERNS = [
+  /\bstand(?:s|ing)?\s+by\s+silently\b/i,
+  /\bteam\s+stays\s+alive\b/i,
+  /\b(?:will\s+not|won['’]t|do\s+not)\s+call\s+team[- ]?done\b/i,
+  /\bgoing\s+silent\b/i,
+  /\bclosing\s+loop,\s*going\s+silent\b/i,
+]
+const STANDING_BY_IDLE_MS = parseEnvMs('ENSEMBLE_STANDING_BY_IDLE_MS', 30 * 60 * 1000)
+
 // FIX 1: bracket tag must occupy a message edge to count as a sign-off. The
 // start anchor only allows whitespace before the tag (so "[DONE]" or "  [DONE]
 // my part" matches, but "as instructed emit [DONE] when ready" does not). The
@@ -183,6 +202,27 @@ class EnsembleService {
       await this.detectCrashedAgents(team)
 
       if (this.disbandingTeams.has(team.id)) continue
+
+      // Hard timeout / standing-by detection — runs BEFORE shouldAutoDisband
+      // so it kicks in even when no completion signal exists.
+      const lifetimeReason = this.lifetimeOrStandingByReason(team)
+      if (lifetimeReason) {
+        this.disbandingTeams.add(team.id)
+        try {
+          await disbandTeam(team.id, lifetimeReason.reason, {
+            triggeredBy: 'lifetime-cap',
+            ageMs: lifetimeReason.ageMs,
+            idleMs: lifetimeReason.idleMs,
+            standingByMatch: lifetimeReason.standingByMatch,
+          })
+        } catch (err) {
+          console.error(`[Ensemble] Lifetime-cap disband failed for ${team.id}:`, err)
+        } finally {
+          this.disbandingTeams.delete(team.id)
+        }
+        continue
+      }
+
       if (!this.shouldAutoDisband(team)) continue
 
       this.disbandingTeams.add(team.id)
@@ -197,6 +237,65 @@ class EnsembleService {
         this.disbandingTeams.delete(team.id)
       }
     }
+  }
+
+  /**
+   * FIX 1: hard lifetime cap + standing-by-silently detection.
+   * Returns null if team is fine, or a structured reason if it should be
+   * disbanded.
+   *
+   * Two trigger paths:
+   *   - Lifetime: team age exceeds MAX_TEAM_LIFETIME_MS. Defensive cap to
+   *     prevent indefinite zombie 'active' teams when agents never call
+   *     team-done.sh.
+   *   - Standing-by: any of last 5 agent messages explicitly says "team
+   *     stays alive" / "going silent" / "will not call team-done" AND the
+   *     team has been idle > STANDING_BY_IDLE_MS. This is a direct signal
+   *     from agents that they've decided to wait indefinitely; we honor it
+   *     for the configured idle window then disband with a clear reason
+   *     so the operator's Claude Code window unblocks.
+   */
+  private lifetimeOrStandingByReason(team: EnsembleTeam): null | {
+    reason: string; ageMs: number; idleMs: number; standingByMatch?: string
+  } {
+    const now = Date.now()
+    const createdAt = new Date(team.createdAt).getTime()
+    if (!Number.isFinite(createdAt)) return null
+    const ageMs = now - createdAt
+
+    if (MAX_TEAM_LIFETIME_MS > 0 && ageMs > MAX_TEAM_LIFETIME_MS) {
+      return {
+        reason: `lifetime-cap: team age ${Math.round(ageMs / 60_000)}min exceeded ${Math.round(MAX_TEAM_LIFETIME_MS / 60_000)}min cap`,
+        ageMs,
+        idleMs: 0,
+      }
+    }
+
+    // Standing-by: scan last 5 non-ensemble messages for explicit "wait" pattern
+    const messages = getMessages(team.id)
+    const agentMsgs = messages.filter(m => m.from !== 'ensemble' && m.from !== 'user')
+    if (agentMsgs.length === 0) return null
+    const lastAgentMsg = agentMsgs[agentMsgs.length - 1]
+    const lastTs = lastAgentMsg.timestamp ? new Date(lastAgentMsg.timestamp).getTime() : 0
+    const idleMs = lastTs ? now - lastTs : 0
+
+    if (idleMs > STANDING_BY_IDLE_MS) {
+      const recent = agentMsgs.slice(-5)
+      for (const m of recent) {
+        for (const pattern of STANDING_BY_PATTERNS) {
+          const match = (m.content || '').match(pattern)
+          if (match) {
+            return {
+              reason: `standing-by: agents declared "${match[0]}" + ${Math.round(idleMs / 60_000)}min idle`,
+              ageMs,
+              idleMs,
+              standingByMatch: match[0],
+            }
+          }
+        }
+      }
+    }
+    return null
   }
 
   // Track which agents we've already flagged as crashed so we don't spam

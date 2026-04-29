@@ -53,7 +53,9 @@ function makeTeam(overrides: Partial<EnsembleTeam> = {}): EnsembleTeam {
       },
     ],
     createdBy: overrides.createdBy ?? 'test',
-    createdAt: overrides.createdAt ?? '2026-03-18T10:00:00.000Z',
+    // Default to "just now" so the real-time MAX_TEAM_LIFETIME_MS check
+    // doesn't fire on tests that use historical message timestamps.
+    createdAt: overrides.createdAt ?? new Date().toISOString(),
     completedAt: overrides.completedAt,
     feedMode: overrides.feedMode ?? 'live',
     result: overrides.result,
@@ -533,6 +535,50 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     await mod.checkIdleTeams()
 
     expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(true)
+  })
+
+  // FIX: lifetime cap forces disband on teams running >90 min so the SKILL.md
+  // .finished watcher doesn't block the user's window indefinitely.
+  it('disbands teams older than MAX_TEAM_LIFETIME_MS even without completion signals', async () => {
+    // Team created 100 min ago; messages from same era so idle is moderate.
+    const oldTs = new Date(Date.now() - 100 * 60 * 1000).toISOString()
+    const team = makeTeam({ createdAt: oldTs })
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'still working', timestamp: new Date(Date.now() - 30 * 60 * 1000).toISOString() }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'still working too', timestamp: new Date(Date.now() - 30 * 60 * 1000).toISOString() }),
+    ]
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(true)
+  })
+
+  it('disbands "standing by silently" teams after STANDING_BY_IDLE_MS even when CLI processes are alive', async () => {
+    const createdTs = new Date(Date.now() - 50 * 60 * 1000).toISOString()  // 50 min old (under 90min cap)
+    const team = makeTeam({ createdAt: createdTs })
+    // Last agent message 35 min ago — past STANDING_BY_IDLE_MS (30 min)
+    const idleTs = new Date(Date.now() - 35 * 60 * 1000).toISOString()
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'I will not call team-done. Team stays alive for human cherry-pick.', timestamp: idleTs }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Aligned, going silent. Team stays alive.', timestamp: idleTs }),
+    ]
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+    expect(appendedMessages.some(m => m.content.toLowerCase().includes('disband'))).toBe(true)
+    expect(appendedMessages.some(m => /standing[- ]by/i.test(m.content))).toBe(true)
+  })
+
+  it('does NOT disband on standing-by markers when team is still actively messaging (idle < threshold)', async () => {
+    const createdTs = new Date(Date.now() - 40 * 60 * 1000).toISOString()
+    const team = makeTeam({ createdAt: createdTs })
+    // Last message 5 min ago — well under 30min standing-by idle threshold
+    const recentTs = new Date(Date.now() - 5 * 60 * 1000).toISOString()
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Team stays alive while I patch X.', timestamp: recentTs }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'still going', timestamp: recentTs }),
+    ]
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+    expect(appendedMessages.some(m => /standing[- ]by/i.test(m.content))).toBe(false)
   })
 
   it('bridge-zombie guard: does NOT auto-disband when messages.jsonl mtime is fresher than registry last-message', async () => {
