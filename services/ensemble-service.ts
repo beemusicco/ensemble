@@ -991,6 +991,103 @@ const LLM_COOLDOWN_MS = parseInt(process.env['ENSEMBLE_LLM_COOLDOWN_MS'] ?? '', 
 let llmCooldownUntilTs = 0
 
 /**
+ * Pre-kill reflection: deliver a private prompt to each active local agent's
+ * tmux pane asking them to note ONE thing they'd do differently + ONE thing
+ * the next team must know. Capture the response after a short delay, parse
+ * lines, persist as memories tagged [reflection, auto_extracted, project].
+ *
+ * Mechanism:
+ *   1. Paste the reflection prompt into each pane via runtime.pasteFromFile
+ *   2. Wait 25s for agent to reason + emit
+ *   3. capturePane(50 lines) and grep for the structured response
+ *   4. Skip silently if pane is dead (agent already exited) or parse fails
+ *
+ * Cost: zero new API calls — uses the agent's already-running CLI session
+ * to generate reflections. Time: ~25s added to disband path (parallelized
+ * across agents).
+ */
+async function collectAgentReflections(team: EnsembleTeam): Promise<void> {
+  const runtime = getRuntime()
+  const activeLocalAgents = team.agents.filter(a =>
+    a.status === 'active' && (!a.hostId || isSelf(a.hostId))
+  )
+  if (activeLocalAgents.length === 0) return
+  const project = currentProjectFromCwd((team as { workingDirectory?: string }).workingDirectory)
+  const reflectionPrompt = [
+    `🪞 PRE-DISBAND REFLECTION (private; not visible to teammates).`,
+    `In ONE message, output the following structured block exactly:`,
+    ``,
+    `[REFLECTION]`,
+    `would_differently: <one-line — what would you change about your approach next time?>`,
+    `must_know: <one-line — what must the NEXT team know to avoid your mistakes / build on your work?>`,
+    `[/REFLECTION]`,
+    ``,
+    `Be specific (file:line, exact pitfall, concrete decision). Skip generic advice.`,
+    `Do NOT use team-say — emit directly in this CLI's response. We'll read it from the pane.`,
+  ].join('\n')
+
+  // Deliver in parallel — avoid serial 25s × N agents wait.
+  await Promise.allSettled(activeLocalAgents.map(async (agent) => {
+    const sessionName = `${team.name}-${agent.name}`
+    try {
+      // Skip if pane is already dead (agent exited).
+      if (runtime.paneCurrentCommand) {
+        const cmd = (await runtime.paneCurrentCommand(sessionName)).toLowerCase().replace(/\.exe$/, '')
+        if (cmd && new Set(['zsh','bash','sh','fish','dash']).has(cmd)) return
+      }
+      // Paste prompt + wait
+      const tmpFile = collabDeliveryFile(team.id, sessionName) + '.reflection'
+      fs.mkdirSync(path.dirname(tmpFile), { recursive: true })
+      fs.writeFileSync(tmpFile, reflectionPrompt)
+      await runtime.pasteFromFile(sessionName, tmpFile)
+      // Give agent 25s to reason + emit
+      await new Promise(r => setTimeout(r, 25_000))
+      const tail = await runtime.capturePane(sessionName, 80)
+      const match = tail.match(/\[REFLECTION\]\s*\n?([\s\S]*?)\n?\[\/REFLECTION\]/i)
+      if (!match) {
+        console.log(`[Ensemble] Reflection: no structured response from ${agent.name}`)
+        return
+      }
+      const body = match[1]
+      const wouldMatch = body.match(/would_differently:\s*(.+?)(?:\n|$)/i)
+      const mustMatch = body.match(/must_know:\s*(.+?)(?:\n|$)/i)
+      const baseTags = ['reflection', 'auto_extracted', team.id.slice(0, 8)]
+      if (project) baseTags.push(project)
+      let saved = 0
+      if (wouldMatch && wouldMatch[1].trim().length >= 20) {
+        const v = wouldMatch[1].trim().slice(0, 400)
+        writeMemory({
+          scope: 'global',
+          key: `reflection_${agent.name}_${shortHash('would|' + v)}`,
+          value: `WOULD DIFFERENTLY (${agent.name}): ${v}`,
+          tags: [...baseTags, 'would_differently'],
+          agent: agent.name,
+          teamId: team.id,
+        })
+        saved++
+      }
+      if (mustMatch && mustMatch[1].trim().length >= 20) {
+        const v = mustMatch[1].trim().slice(0, 400)
+        writeMemory({
+          scope: 'global',
+          key: `reflection_${agent.name}_${shortHash('must|' + v)}`,
+          value: `MUST KNOW for next team (${agent.name}): ${v}`,
+          tags: [...baseTags, 'must_know'],
+          agent: agent.name,
+          teamId: team.id,
+        })
+        saved++
+      }
+      if (saved > 0) {
+        console.log(`[Ensemble] Reflection: saved ${saved} entries from ${agent.name}`)
+      }
+    } catch (err) {
+      console.warn(`[Ensemble] Reflection failed for ${agent.name}:`, err)
+    }
+  }))
+}
+
+/**
  * Optional LLM-aided lesson extraction. Spawns `claude -p --model haiku`
  * with the disbanded team's last 50 agent messages and asks for 1-5 reusable
  * lessons in JSON. Each accepted lesson is persisted via writeMemory with
@@ -1936,6 +2033,19 @@ export async function disbandTeam(
   // usage — reuse its result here so we don't run capture-pane twice per
   // agent on disband.
   const tokenUsageMap = await writeDisbandSummary(teamId)
+
+  // Pre-kill reflection: ask each active local agent to privately note
+  // ONE thing they'd do differently + ONE thing the next team must know.
+  // Saved as memories with tag [reflection] so future collabs see them in
+  // TEAM MEMORIES via semantic match. Opt-IN via ENSEMBLE_REFLECTION=1
+  // (default off until empirical hit-rate is verified).
+  if (process.env['ENSEMBLE_REFLECTION'] === '1') {
+    try {
+      await collectAgentReflections(team)
+    } catch (err) {
+      console.warn(`[Ensemble] Reflection collection failed for ${teamId.slice(0, 8)}:`, err)
+    }
+  }
 
   for (const agent of team.agents) {
     if (agent.status === 'active') {
