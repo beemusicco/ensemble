@@ -7,22 +7,27 @@
  * This guard scans messages for `<path>:<line>` patterns, resolves the path
  * against the worktree, and verifies the line is in range.
  *
- * Strategy:
- *   • Match `path/to/file.ext:NN` patterns where ext is a code-ish extension
- *     (ts, tsx, js, jsx, py, go, rs, java, rb, php, sh, vue, svelte, json,
- *     yml, yaml, md, toml). Avoid matching URLs / version strings / time
- *     stamps by requiring the path token to look filesystem-y (contain `/`
- *     or end in a known ext).
- *   • Resolve relative to worktree root. If absent, also try the parent repo
- *     root (some agents quote relative-to-repo paths even from a worktree).
- *   • If file exists, count lines; flag if cited line > line count.
- *   • If file missing, flag it.
+ * Resolution strategy (W2.5 — production-tuned 2026-04-30):
+ *   1. Direct resolve against `worktreePath` (full citation path).
+ *   2. Direct resolve against each `fallbackPaths` entry (typically agent
+ *      worktrees — VERIFY runs BEFORE merge, so files only exist in agent
+ *      branches at that moment).
+ *   3. Basename fallback — walk all roots, build basename → [paths] index.
+ *      Citations like `DashboardPage.jsx:362` (without directory) resolve
+ *      to whichever path matches the basename. If multiple matches, take
+ *      MAX line count (most permissive — we'd rather miss a fake cite than
+ *      cry wolf at a real one).
  *
- * The guard is permissive — it only flags clear confabulations (file does not
- * exist or line is out of range). It does NOT verify that the cited content
- * matches the agent's claim — that would require LLM semantics. The point is
- * to catch the easy fabrications (numbers pulled out of the air); deeper
- * citation auditing is a future enhancement.
+ * Why this matters: production observation (collab 1781bdca, 2026-04-30)
+ * showed claude-1 citing 5 valid file:line refs that all flagged as
+ * confabulations because (a) cites were basename-only, (b) the cited files
+ * were brand-new in codex-2's worktree, not yet merged into project root
+ * scanned by the guard. Trust erodes if guard cries wolf — agents start
+ * ignoring it.
+ *
+ * The guard remains permissive — only flags clear confabulations (basename
+ * doesn't appear ANYWHERE, or line exceeds longest match). Doesn't verify
+ * cited content matches the agent's claim (that needs LLM semantics).
  */
 
 import fs from 'fs'
@@ -33,7 +38,7 @@ export interface CitationCheck {
   filePath: string
   line: number
   exists: boolean
-  lineCount: number | null  // null if file doesn't exist
+  lineCount: number | null  // null if file doesn't exist OR too big to count
   inRange: boolean
 }
 
@@ -63,9 +68,66 @@ function isCodeExt(p: string): boolean {
   return !!ext && CODE_EXTS.includes(ext)
 }
 
+// ───────────────────────────────────────────────────────────────────
+// Basename indexing — walks worktree(s) once per scan, builds a
+// basename → [paths] map so citations like `Foo.tsx:42` (no directory)
+// can be resolved without forcing the agent to type full paths.
+// ───────────────────────────────────────────────────────────────────
+
+const SKIP_DIRS = new Set([
+  'node_modules', '.git', 'dist', 'build', '.worktrees',
+  '__pycache__', '.next', '.cache', '.venv', 'venv',
+  '.pytest_cache', '.mypy_cache', '.ruff_cache', 'coverage',
+  '.turbo', '.parcel-cache', 'target', '.gradle', '.idea', '.vscode',
+])
+
+const MAX_INDEXED_FILES = 50_000  // hard cap to bound walk cost
+
+export interface SearchIndex {
+  byBasename: Map<string, string[]>
+  totalIndexed: number
+}
+
+export function buildSearchIndex(roots: string[]): SearchIndex {
+  const byBasename = new Map<string, string[]>()
+  let count = 0
+  const seenRoots = new Set<string>()
+
+  function walk(dir: string): void {
+    if (count >= MAX_INDEXED_FILES) return
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch { return }
+    for (const e of entries) {
+      if (count >= MAX_INDEXED_FILES) return
+      if (SKIP_DIRS.has(e.name)) continue
+      const full = path.join(dir, e.name)
+      if (e.isDirectory()) {
+        walk(full)
+      } else if (e.isFile()) {
+        count++
+        const list = byBasename.get(e.name)
+        if (list) list.push(full)
+        else byBasename.set(e.name, [full])
+      }
+    }
+  }
+
+  for (const r of roots) {
+    if (!r) continue
+    const abs = path.resolve(r)
+    if (seenRoots.has(abs)) continue
+    seenRoots.add(abs)
+    if (fs.existsSync(abs)) walk(abs)
+  }
+
+  return { byBasename, totalIndexed: count }
+}
+
 interface ResolveOpts {
   worktreePath: string
-  fallbackPaths?: string[]  // additional roots to try (e.g. parent repo)
+  fallbackPaths?: string[]
 }
 
 function resolveExistingFile(citationPath: string, opts: ResolveOpts): string | null {
@@ -106,12 +168,22 @@ export interface ScanCitationsInput {
   text: string
   worktreePath: string
   fallbackPaths?: string[]
+  /** Pre-built basename index reused across many scanCitations calls in one VERIFY pass. Built on demand if absent. */
+  searchIndex?: SearchIndex
 }
 
 export function scanCitations(input: ScanCitationsInput): CitationCheck[] {
   const out: CitationCheck[] = []
   const seen = new Set<string>()  // dedupe identical raw citations
   const re = new RegExp(CITATION_RE.source, CITATION_RE.flags)
+
+  // Build (or reuse) the basename index — used as fallback when direct
+  // resolve fails. Production showed agents typically cite by basename
+  // (`DashboardPage.jsx:362`) without directory prefix.
+  const index = input.searchIndex ?? buildSearchIndex(
+    [input.worktreePath, ...(input.fallbackPaths ?? [])],
+  )
+
   let match: RegExpExecArray | null
   while ((match = re.exec(input.text))) {
     const filePath = match[2]
@@ -125,25 +197,52 @@ export function scanCitations(input: ScanCitationsInput): CitationCheck[] {
     // Also skip URLs that slipped through: typical pattern `http://...:port`.
     if (/^https?:\/\//i.test(filePath)) continue
 
+    // Tier 1: direct resolve against worktreePath + fallbackPaths
     const resolved = resolveExistingFile(filePath, {
       worktreePath: input.worktreePath,
       fallbackPaths: input.fallbackPaths,
     })
-    if (!resolved) {
+    if (resolved) {
+      const lc = countLines(resolved)
+      if (lc === -1) {
+        out.push({ rawCitation: raw, filePath, line, exists: true, lineCount: null, inRange: true })
+      } else {
+        out.push({
+          rawCitation: raw, filePath, line,
+          exists: true, lineCount: lc,
+          inRange: line >= 1 && line <= lc,
+        })
+      }
+      continue
+    }
+
+    // Tier 2: basename fallback — look up just the file name in the index
+    const basename = path.basename(filePath)
+    const candidates = index.byBasename.get(basename) ?? []
+    if (candidates.length === 0) {
+      // Truly missing — file with this basename doesn't exist anywhere we
+      // searched. This is a real confabulation candidate.
       out.push({ rawCitation: raw, filePath, line, exists: false, lineCount: null, inRange: false })
       continue
     }
-    const lineCount = countLines(resolved)
-    if (lineCount === -1) {
-      // File too big or unreadable — assume in range (don't cry wolf).
-      out.push({ rawCitation: raw, filePath, line, exists: true, lineCount: null, inRange: true })
-      continue
+    // Found by basename — take the MAX line count across matches (most
+    // permissive: if any version of the file has enough lines, we accept).
+    let maxLineCount = 0
+    let anyTooBig = false
+    for (const p of candidates) {
+      const lc = countLines(p)
+      if (lc === -1) { anyTooBig = true; break }
+      if (lc > maxLineCount) maxLineCount = lc
     }
-    out.push({
-      rawCitation: raw, filePath, line,
-      exists: true, lineCount,
-      inRange: line >= 1 && line <= lineCount,
-    })
+    if (anyTooBig) {
+      out.push({ rawCitation: raw, filePath, line, exists: true, lineCount: null, inRange: true })
+    } else {
+      out.push({
+        rawCitation: raw, filePath, line,
+        exists: true, lineCount: maxLineCount,
+        inRange: line >= 1 && line <= maxLineCount,
+      })
+    }
   }
   return out
 }
@@ -162,7 +261,7 @@ export function findConfabulations(checks: CitationCheck[]): CitationCheck[] {
  */
 export function formatConfabulationWarning(agentName: string, check: CitationCheck): string {
   if (!check.exists) {
-    return `⚠️ confabulation: ${agentName} cited \`${check.rawCitation}\` — file not found in worktree.`
+    return `⚠️ confabulation: ${agentName} cited \`${check.rawCitation}\` — file not found in worktree (or any agent branch).`
   }
-  return `⚠️ confabulation: ${agentName} cited \`${check.rawCitation}\` — file has ${check.lineCount} line${check.lineCount === 1 ? '' : 's'}, line ${check.line} is out of range.`
+  return `⚠️ confabulation: ${agentName} cited \`${check.rawCitation}\` — file has ${check.lineCount} line${check.lineCount === 1 ? '' : 's'} in the longest version, line ${check.line} is out of range.`
 }

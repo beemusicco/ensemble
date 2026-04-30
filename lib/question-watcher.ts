@@ -23,8 +23,9 @@ import { v4 as uuidv4 } from 'uuid'
 import type { EnsembleMessage } from '../types/ensemble'
 import { appendMessage, getMessages } from './ensemble-registry'
 import { sendTelegramMessage, getTelegramToken } from './telegram-out'
+import { findTags } from './tag-parser'
 
-const QUESTION_TAG_RE = /\[QUESTION:\s*([^\]\n]{1,400})\]/g
+const QUESTION_BODY_MAX = 600
 const DEFAULT_TIMEOUT_MS = 5 * 60_000  // 5 minutes per W3 spec
 
 interface PendingQuestion {
@@ -54,10 +55,9 @@ function extractQuestions(messages: EnsembleMessage[]): Array<{ agent: string; c
   for (const m of messages) {
     if (!m.from || m.from === 'ensemble' || m.from === 'system' || m.from === 'operator') continue
     if (!m.content) continue
-    const re = new RegExp(QUESTION_TAG_RE.source, QUESTION_TAG_RE.flags)
-    let match: RegExpExecArray | null
-    while ((match = re.exec(m.content))) {
-      const claim = match[1].trim()
+    const tags = findTags(m.content, 'QUESTION', { maxBodyChars: QUESTION_BODY_MAX })
+    for (const t of tags) {
+      const claim = t.body
       if (!claim) continue
       const cacheKey = `${m.teamId}::${normalizeClaim(claim)}::${m.from}`
       if (pingedKeys.has(cacheKey)) continue

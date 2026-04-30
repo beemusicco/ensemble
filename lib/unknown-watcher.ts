@@ -29,14 +29,19 @@ import { v4 as uuidv4 } from 'uuid'
 import type { EnsembleMessage } from '../types/ensemble'
 import { appendMessage, getMessages } from './ensemble-registry'
 import { queryMemoriesSemantic } from './memory-store'
+import { findTags } from './tag-parser'
 
-const UNKNOWN_TAG_RE = /\[UNKNOWN:\s*([^\]\n]{1,200})\]/g
 // [ASSUMPTION: claim] — flagged-only (W2 behavior preserved)
 // [ASSUMPTION: claim ## verify: cmd] — auto-executed by verifier (W3)
 // We use `## verify:` as the separator because `||` and `|` can appear in
 // shell commands, but `## verify:` is unlikely to collide.
-const ASSUMPTION_TAG_RE = /\[ASSUMPTION:\s*([^\]\n]{1,400})\]/g
+//
+// Parsing now uses bracket-balanced findTags() instead of regex — the regex
+// `[^\]\n]` truncated cmds containing literals like `[1,2,3]` (W3 production
+// finding from collab 1781bdca, 2026-04-30).
 const ASSUMPTION_VERIFY_SEPARATOR = /\s*##\s*verify:\s*/i
+const UNKNOWN_BODY_MAX = 200
+const ASSUMPTION_BODY_MAX = 600  // bumped from 400 to accommodate `## verify:` clauses with realistic shell pipelines
 
 interface ParsedAssumption {
   claim: string
@@ -166,10 +171,9 @@ function extractUnknowns(messages: EnsembleMessage[], teamId: string): UnknownTa
   for (const m of messages) {
     if (!m.from || m.from === 'ensemble' || m.from === 'system') continue
     if (!m.content) continue
-    const re = new RegExp(UNKNOWN_TAG_RE.source, UNKNOWN_TAG_RE.flags)
-    let match: RegExpExecArray | null
-    while ((match = re.exec(m.content))) {
-      const tag = match[1].trim()
+    const tags = findTags(m.content, 'UNKNOWN', { maxBodyChars: UNKNOWN_BODY_MAX })
+    for (const t of tags) {
+      const tag = t.body
       if (!tag) continue
       const cacheKey = `${teamId}::${normalizeTag(tag)}::${m.from}`
       if (answeredCache.has(cacheKey)) continue
@@ -245,10 +249,9 @@ export async function flagAssumptions(
   let flagged = 0
   for (const m of messages) {
     if (!m.from || m.from === 'ensemble' || !m.content) continue
-    const re = new RegExp(ASSUMPTION_TAG_RE.source, ASSUMPTION_TAG_RE.flags)
-    let match: RegExpExecArray | null
-    while ((match = re.exec(m.content))) {
-      const raw = match[1].trim()
+    const tags = findTags(m.content, 'ASSUMPTION', { maxBodyChars: ASSUMPTION_BODY_MAX })
+    for (const t of tags) {
+      const raw = t.body
       if (!raw) continue
       const { claim, verifyCmd } = parseAssumption(raw)
       const cacheKey = `assumption::${teamId}::${normalizeTag(claim)}::${m.from}`

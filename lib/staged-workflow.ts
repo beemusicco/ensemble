@@ -12,7 +12,7 @@ import { isSelf, getHostById } from './hosts-config'
 import { postRemoteSessionCommand } from './agent-spawner'
 import { loadBulletproofConfig } from './bulletproof-config'
 import { runVerifyChecks, formatVerifySummary, type VerifyRunSummary } from './verify-runner'
-import { scanCitations, findConfabulations, formatConfabulationWarning } from './confabulation-guard'
+import { scanCitations, findConfabulations, formatConfabulationWarning, buildSearchIndex } from './confabulation-guard'
 import fs from 'fs'
 import path from 'path'
 
@@ -449,6 +449,10 @@ export class StagedWorkflowManager {
    * Scan agent verify-phase messages for confabulated file:line citations.
    * Posts a warning per confabulation and returns the count so the auto-fix
    * loop can treat them as evidence that VERIFY did not converge.
+   *
+   * W2.5: scans across (project root + every agent worktree) so cites to
+   * worktree-only changes resolve correctly. The basename index is built
+   * ONCE per scan and reused across all messages — bounded walk cost.
    */
   private async runConfabulationScan(sinceTimestamp: string): Promise<number> {
     const checkPath = this.resolveCheckPath()
@@ -457,10 +461,24 @@ export class StagedWorkflowManager {
     const messages = this.collectAgentMessagesSince(sinceTimestamp)
     if (messages.length === 0) return 0
 
+    // Collect agent worktree paths — these are where pre-merge edits live.
+    const agentWorktrees = this.options.team.agents
+      .map(a => (a as { worktreePath?: string }).worktreePath)
+      .filter((p): p is string => !!p && fs.existsSync(p))
+
+    // Build the basename index ONCE for this VERIFY scan. Reused across
+    // every message — agents typically share the same worktree contents.
+    const searchIndex = buildSearchIndex([checkPath, ...agentWorktrees])
+
     let total = 0
     const warnedKeys = new Set<string>()
     for (const m of messages) {
-      const checks = scanCitations({ text: m.content, worktreePath: checkPath })
+      const checks = scanCitations({
+        text: m.content,
+        worktreePath: checkPath,
+        fallbackPaths: agentWorktrees,
+        searchIndex,
+      })
       const confab = findConfabulations(checks)
       for (const c of confab) {
         const key = `${m.from}::${c.rawCitation}`
