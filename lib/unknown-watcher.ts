@@ -31,7 +31,26 @@ import { appendMessage, getMessages } from './ensemble-registry'
 import { queryMemoriesSemantic } from './memory-store'
 
 const UNKNOWN_TAG_RE = /\[UNKNOWN:\s*([^\]\n]{1,200})\]/g
-const ASSUMPTION_TAG_RE = /\[ASSUMPTION:\s*([^\]\n]{1,200})\]/g
+// [ASSUMPTION: claim] — flagged-only (W2 behavior preserved)
+// [ASSUMPTION: claim ## verify: cmd] — auto-executed by verifier (W3)
+// We use `## verify:` as the separator because `||` and `|` can appear in
+// shell commands, but `## verify:` is unlikely to collide.
+const ASSUMPTION_TAG_RE = /\[ASSUMPTION:\s*([^\]\n]{1,400})\]/g
+const ASSUMPTION_VERIFY_SEPARATOR = /\s*##\s*verify:\s*/i
+
+interface ParsedAssumption {
+  claim: string
+  verifyCmd: string | null
+}
+
+function parseAssumption(raw: string): ParsedAssumption {
+  const match = raw.match(ASSUMPTION_VERIFY_SEPARATOR)
+  if (!match) return { claim: raw.trim(), verifyCmd: null }
+  const idx = raw.search(ASSUMPTION_VERIFY_SEPARATOR)
+  const claim = raw.slice(0, idx).trim()
+  const verifyCmd = raw.slice(idx + match[0].length).trim()
+  return { claim, verifyCmd: verifyCmd || null }
+}
 
 const DOCS_PATHS = [
   path.join(os.homedir(), '.openclaw', 'docs'),
@@ -204,15 +223,23 @@ export async function scanAndAnswerUnknowns(
 }
 
 /**
- * Surface ASSUMPTION tags into the feed without auto-resolving them. The
- * point of [ASSUMPTION] is "this is unverified — flag for verification";
- * we don't do auto-verification (that's W3) but we do echo the assumption
- * back to the team so it can't be silently dropped. Each assumption is
- * echoed once per (team, tag, agent).
+ * Surface ASSUMPTION tags into the feed. Two modes:
+ *   • Bare: `[ASSUMPTION: claim]` — flagged-only, echoed to feed
+ *   • With verifier: `[ASSUMPTION: claim ## verify: cmd]` — runs the cmd,
+ *     posts 🟢 verified / 🔴 rejected based on exit code.
+ *
+ * The cmd is run via bash -c with a hard 30s timeout in the team's working
+ * directory (resolved by the caller — for unknown-watcher we use cwd that
+ * the operator started ensemble in, which is typically ~/.openclaw). Output
+ * is captured + truncated to 1200 chars and embedded in the result message.
+ *
+ * Each (team, claim, agent) tuple is processed once — re-emissions don't
+ * trigger redundant verification.
  */
 export async function flagAssumptions(
   teamId: string,
   sinceTimestamp?: string,
+  opts: { verifyCwd?: string; verifyTimeoutMs?: number } = {},
 ): Promise<number> {
   const messages = getMessages(teamId, sinceTimestamp)
   let flagged = 0
@@ -221,25 +248,122 @@ export async function flagAssumptions(
     const re = new RegExp(ASSUMPTION_TAG_RE.source, ASSUMPTION_TAG_RE.flags)
     let match: RegExpExecArray | null
     while ((match = re.exec(m.content))) {
-      const tag = match[1].trim()
-      if (!tag) continue
-      const cacheKey = `assumption::${teamId}::${normalizeTag(tag)}::${m.from}`
+      const raw = match[1].trim()
+      if (!raw) continue
+      const { claim, verifyCmd } = parseAssumption(raw)
+      const cacheKey = `assumption::${teamId}::${normalizeTag(claim)}::${m.from}`
       if (answeredCache.has(cacheKey)) continue
       answeredCache.add(cacheKey)
-      appendMessage(teamId, {
-        id: uuidv4(),
-        teamId,
-        from: 'ensemble',
-        to: 'team',
-        content: `🟡 assumption-flag: ${m.from} stated [ASSUMPTION: ${tag}] — verify this before [VERIFY_DONE]. If unverifiable, escalate to [QUESTION: ...] or treat as a blocker.`,
-        type: 'chat',
-        timestamp: new Date().toISOString(),
-        meta: { event: 'assumption_flagged', tag, agent: m.from },
-      })
+
+      if (verifyCmd) {
+        // Auto-verify path
+        const result = await runVerifyCommand(verifyCmd, opts.verifyCwd, opts.verifyTimeoutMs)
+        const icon = result.passed ? '🟢 verified' : '🔴 rejected'
+        const banner = result.timedOut
+          ? `⏱ TIMEOUT after ${result.durationMs}ms`
+          : `exit=${result.exitCode}`
+        const truncatedOut = result.output.length > 1200
+          ? result.output.slice(0, 1100) + '\n…[truncated]'
+          : result.output
+        appendMessage(teamId, {
+          id: uuidv4(),
+          teamId,
+          from: 'ensemble',
+          to: 'team',
+          content: [
+            `${icon}: ${m.from}'s [ASSUMPTION: ${claim}]`,
+            `  $ ${verifyCmd}  (${banner})`,
+            `  ${truncatedOut.split('\n').join('\n  ')}`,
+            result.passed
+              ? ''
+              : `  ⚠️ Rejected assumption — agent must address this before [VERIFY_DONE].`,
+          ].filter(Boolean).join('\n'),
+          type: 'chat',
+          timestamp: new Date().toISOString(),
+          meta: {
+            event: 'assumption_verified',
+            claim, verifyCmd,
+            agent: m.from,
+            passed: result.passed,
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+          },
+        })
+      } else {
+        // Bare flag (no verify cmd) — same behavior as W2
+        appendMessage(teamId, {
+          id: uuidv4(),
+          teamId,
+          from: 'ensemble',
+          to: 'team',
+          content: `🟡 assumption-flag: ${m.from} stated [ASSUMPTION: ${claim}] — verify this before [VERIFY_DONE]. Tip: append \` ## verify: <cmd>\` to auto-verify on next tick. If unverifiable, escalate to [QUESTION: ...].`,
+          type: 'chat',
+          timestamp: new Date().toISOString(),
+          meta: { event: 'assumption_flagged', tag: claim, agent: m.from },
+        })
+      }
       flagged++
     }
   }
   return flagged
+}
+
+interface VerifyCmdResult {
+  passed: boolean
+  exitCode: number | null
+  output: string
+  durationMs: number
+  timedOut: boolean
+}
+
+async function runVerifyCommand(
+  cmd: string,
+  cwd: string | undefined,
+  timeoutMs: number = 30_000,
+): Promise<VerifyCmdResult> {
+  const startedAt = Date.now()
+  const { spawn } = await import('child_process')
+  return await new Promise(resolve => {
+    const proc = spawn('bash', ['-lc', cmd], {
+      cwd: cwd || process.cwd(),
+      env: process.env,
+    })
+    const chunks: string[] = []
+    let totalLen = 0
+    const onData = (data: Buffer): void => {
+      const s = data.toString('utf-8')
+      totalLen += s.length
+      if (totalLen <= 6000) chunks.push(s)
+    }
+    proc.stdout?.on('data', onData)
+    proc.stderr?.on('data', onData)
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      try { proc.kill('SIGTERM') } catch { /* */ }
+      setTimeout(() => { try { proc.kill('SIGKILL') } catch { /* */ } }, 1500)
+    }, timeoutMs)
+    proc.on('close', exitCode => {
+      clearTimeout(timer)
+      resolve({
+        passed: !timedOut && exitCode === 0,
+        exitCode: exitCode ?? null,
+        output: chunks.join('').trim(),
+        durationMs: Date.now() - startedAt,
+        timedOut,
+      })
+    })
+    proc.on('error', err => {
+      clearTimeout(timer)
+      resolve({
+        passed: false,
+        exitCode: null,
+        output: `spawn error: ${err.message}`,
+        durationMs: Date.now() - startedAt,
+        timedOut: false,
+      })
+    })
+  })
 }
 
 // Test-only: lets the test suite reset cached answers between cases.

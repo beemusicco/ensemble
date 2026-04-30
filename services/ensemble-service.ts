@@ -27,6 +27,7 @@ import {
 } from '../lib/collab-paths'
 import { queryMemories, queryMemoriesSemantic, writeMemory } from '../lib/memory-store'
 import { scanAndAnswerUnknowns, flagAssumptions } from '../lib/unknown-watcher'
+import { scanAndDispatchQuestions, answerQuestion, type AnswerInput, type AnswerResult } from '../lib/question-watcher'
 import { appendCostEntry } from '../lib/cost-ledger'
 import { startSpan, endSpan } from '../lib/tracer'
 import { analyzeThinking, pruneAlreadyWarned, getCurrentPhase } from '../lib/thinking-phases'
@@ -199,15 +200,21 @@ class EnsembleService {
       this.runThinkingSupervisor(team.id)
 
       // 🧭 W2 [UNKNOWN]/[ASSUMPTION] watcher — auto-fetch context for tags
-      // emitted by agents in their messages. Each (team, tag, agent) is
-      // answered ONCE — repeats are suppressed by the watcher's cache.
-      // Errors are swallowed: a flaky semantic query / missing rg shouldn't
-      // crash the entire idle tick.
+      // emitted by agents. Each (team, tag, agent) is answered ONCE.
+      // W3 extension: [ASSUMPTION: claim ## verify: cmd] auto-runs the cmd
+      // in the team's workingDirectory and posts 🟢 verified / 🔴 rejected.
+      // Errors are swallowed: a flaky query shouldn't crash the entire tick.
       try {
         await scanAndAnswerUnknowns(team.id)
-        await flagAssumptions(team.id)
+        const wd = (team as { workingDirectory?: string }).workingDirectory
+        await flagAssumptions(team.id, undefined, { verifyCwd: wd })
+        // 📱 W3 [QUESTION] watcher — pings operator via Telegram when an
+        // agent emits a [QUESTION: X] tag. Operator answers via /answer
+        // command in Telegram → proxy.js → /api/ensemble/answer endpoint.
+        // Timeouts (5min) are also expired here.
+        await scanAndDispatchQuestions(team.id)
       } catch (err) {
-        console.warn(`[Ensemble] unknown-watcher tick failed for ${team.id.slice(0, 8)}:`, (err as Error).message)
+        console.warn(`[Ensemble] watcher tick failed for ${team.id.slice(0, 8)}:`, (err as Error).message)
       }
 
       // FIX 2: detect agent CLI crashes mid-flight (UserPromptSubmit hook
@@ -728,9 +735,10 @@ function buildBulletproofBlock(): string {
 function buildLearnOnDemandBlock(teamId: string, agentName: string): string {
   return [
     `🧭 LEARN-ON-DEMAND — when you don't know something, do not guess:`,
-    `  • [UNKNOWN: <concept>]   — ensemble fetches docs / past memories / web`,
-    `  • [ASSUMPTION: <claim>]  — flagged for verification; if false, your work is REJECTED`,
-    `  • [QUESTION: <ask>]      — routed to operator via Telegram (5min timeout)`,
+    `  • [UNKNOWN: <concept>]                          — ensemble auto-fetches memories + docs (~/.openclaw/{docs,workspace})`,
+    `  • [ASSUMPTION: <claim>]                         — flagged in feed; if false, your work is REJECTED`,
+    `  • [ASSUMPTION: <claim> ## verify: <bash-cmd>]   — auto-runs the cmd; exit 0 = 🟢 verified, non-zero = 🔴 rejected (treated as NO-GO blocker)`,
+    `  • [QUESTION: <ask>]                             — pings operator on Telegram (5min timeout); answer routed back to feed by question-id`,
     ``,
     `Use these tags inline in team-say. Better to flag uncertainty than ship hallucination.`,
     `Anti-sycophancy: replies starting with "you're right" without evidence are flagged. Either cite file:line / output OR add [ACK_NO_EVIDENCE].`,
@@ -1299,6 +1307,7 @@ export function buildPromptPreview(params: {
   const teamRecallCmd = `${scriptsDir}/team-recall.sh`
   const teamHistoryCmd = `${scriptsDir}/team-history.sh`
   const teamThinkCmd = `${scriptsDir}/team-think.sh`
+  const teamResearchCmd = `${scriptsDir}/team-research.sh`
   const safeDescription = sanitizeTaskDescription(params.description)
   const isThinkingMode = params.templateName === 'thinking'
 
@@ -1465,6 +1474,10 @@ export function buildPromptPreview(params: {
     `  Read a specific past team's full log: ${teamHistoryCmd} feed <team-id>`,
     `  Browse recent teams: ${teamHistoryCmd} recent [N]`,
     `  Use this BEFORE starting a similar task — prior teams may have solved it, hit dead ends worth avoiding, or surfaced relevant context. Always cite the team-id when building on prior work.`,
+    `RESEARCH (proactive context broadening — distinct from reactive [UNKNOWN: ...]):`,
+    `  ${teamResearchCmd} "<query>" [--url=<url>] [--limit=N]`,
+    `  Aggregates: top-K semantic memory matches + ripgrep across ~/.openclaw/{docs,workspace} + (optional) one URL fetch.`,
+    `  Use BEFORE making a non-obvious decision. Cite results in your team-say. URL fetch is for canonical refs (MDN, RFC, vendor docs) — pass the exact URL, no search.`,
     isThinkingMode ? [
       `THINKING MODE — this team operates under a deliberate reasoning protocol.`,
       `You MUST follow a six-phase flow. Skipping phases or bypassing the typed-message commands triggers supervisor warnings.`,
@@ -2380,6 +2393,18 @@ export function searchHistory(
     })
   }
   return { data: { matches, total: matches.length }, status: 200 }
+}
+
+/**
+ * Resolve a pending [QUESTION] with an operator answer. Called by the HTTP
+ * endpoint that the Telegram proxy hits on `/answer <questionId> <text>`.
+ * Idempotent: returns { resolved: false } if the question id was already
+ * answered or expired.
+ */
+export function answerPendingQuestion(input: AnswerInput): ServiceResult<AnswerResult> {
+  const result = answerQuestion(input)
+  if (!result.resolved) return { data: result, status: 404 }
+  return { data: result, status: 200 }
 }
 
 export function getRecentTeams(limit = 10): ServiceResult<{ teams: EnsembleTeam[] }> {

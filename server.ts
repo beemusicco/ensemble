@@ -7,7 +7,7 @@ import http from 'http'
 import {
   createEnsembleTeam, getEnsembleTeam, listEnsembleTeams,
   getTeamFeed, sendTeamMessage, disbandTeam, signalCompleteTeam,
-  searchHistory, getRecentTeams,
+  searchHistory, getRecentTeams, answerPendingQuestion,
 } from './services/ensemble-service'
 import { getTeam } from './lib/ensemble-registry'
 import { verifyBearer, getAuthToken, getAuthTokenPath } from './lib/auth'
@@ -17,6 +17,7 @@ import {
   writeMemory, queryMemories, deleteMemory, memoryStats,
   type MemoryScope,
 } from './lib/memory-store'
+import { teamResearch, formatResearchOutput } from './lib/team-research'
 
 const SERVER_VERSION = '1.0.0'
 
@@ -348,6 +349,44 @@ const server = http.createServer(async (req, res) => {
       const deleted = deleteMemory(memoryIdMatch[1])
       if (!deleted) return json(res, { error: 'not found' }, 404, origin)
       return json(res, { deleted: true }, 200, origin)
+    }
+
+    // Operator answer to a pending [QUESTION]: POST /api/ensemble/answer
+    // Body: { questionId, answer, fromLabel? }
+    // Called by the Telegram proxy's `/answer <id> <text>` handler.
+    if (path === '/api/ensemble/answer' && method === 'POST') {
+      let body: Record<string, unknown>
+      try { body = JSON.parse(await readBody(req)) } catch {
+        return json(res, { error: 'Bad Request: malformed JSON' }, 400, origin)
+      }
+      const questionId = (body.questionId as string || '').trim()
+      const answer = (body.answer as string || '').trim()
+      if (!questionId || !answer) {
+        return json(res, { error: 'questionId and answer required' }, 400, origin)
+      }
+      const fromLabel = typeof body.fromLabel === 'string' ? body.fromLabel : undefined
+      const result = answerPendingQuestion({ questionId, answer, fromLabel })
+      return json(res, result.data, result.status, origin)
+    }
+
+    // Agent-callable research: /api/ensemble/research?q=<query>&url=<optional>&format=text|json
+    // Aggregates semantic memory + ripgrep over docs + optional WebFetch.
+    if (path === '/api/ensemble/research' && method === 'GET') {
+      const q = (url.searchParams.get('q') || '').trim()
+      if (!q) return json(res, { error: 'q query param required' }, 400, origin)
+      const fetchUrlParam = url.searchParams.get('url') || undefined
+      const limitParam = url.searchParams.get('limit')
+      const memoryLimit = limitParam ? Math.min(Math.max(parseInt(limitParam, 10) || 3, 1), 10) : 3
+      const out = await teamResearch({ query: q, url: fetchUrlParam, memoryLimit })
+      const wantsText = (url.searchParams.get('format') || '').toLowerCase() === 'text'
+      if (wantsText) {
+        res.statusCode = 200
+        res.setHeader('content-type', 'text/plain; charset=utf-8')
+        if (origin) res.setHeader('access-control-allow-origin', origin)
+        res.end(formatResearchOutput(out))
+        return
+      }
+      return json(res, out, 200, origin)
     }
 
     json(res, { error: 'Not found' }, 404, origin)
