@@ -1044,7 +1044,7 @@ describe('buildPromptPreview() — injection guard + completion guidance', () =>
         challengeMode: mode,
       })
       expect(prompt).toContain('BULLETPROOF GATE')
-      expect(prompt).toContain('All tests pass')
+      expect(prompt).toContain('verify-runner')
       expect(prompt).toContain('Edge cases:')
       expect(prompt).toContain('Revert plan:')
       expect(prompt).toContain('High-risk paths')

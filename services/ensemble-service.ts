@@ -26,6 +26,7 @@ import {
   collabBridgeResult, ensureCollabDirs, collabMessagesFile,
 } from '../lib/collab-paths'
 import { queryMemories, queryMemoriesSemantic, writeMemory } from '../lib/memory-store'
+import { scanAndAnswerUnknowns, flagAssumptions } from '../lib/unknown-watcher'
 import { appendCostEntry } from '../lib/cost-ledger'
 import { startSpan, endSpan } from '../lib/tracer'
 import { analyzeThinking, pruneAlreadyWarned, getCurrentPhase } from '../lib/thinking-phases'
@@ -196,6 +197,18 @@ class EnsembleService {
       // disband logic. Each emitted warning is a team-visible message so
       // agents see the same feedback a human reviewer would give.
       this.runThinkingSupervisor(team.id)
+
+      // 🧭 W2 [UNKNOWN]/[ASSUMPTION] watcher — auto-fetch context for tags
+      // emitted by agents in their messages. Each (team, tag, agent) is
+      // answered ONCE — repeats are suppressed by the watcher's cache.
+      // Errors are swallowed: a flaky semantic query / missing rg shouldn't
+      // crash the entire idle tick.
+      try {
+        await scanAndAnswerUnknowns(team.id)
+        await flagAssumptions(team.id)
+      } catch (err) {
+        console.warn(`[Ensemble] unknown-watcher tick failed for ${team.id.slice(0, 8)}:`, (err as Error).message)
+      }
 
       // FIX 2: detect agent CLI crashes mid-flight (UserPromptSubmit hook
       // ENOENT, OOM, manual Ctrl-C). When pane_current_command reports a
@@ -692,15 +705,16 @@ function sanitizeTaskDescription(raw: string): string {
 function buildBulletproofBlock(): string {
   return [
     `🛡️ BULLETPROOF GATE — every [VERIFY_DONE] requires ALL of:`,
-    `  1. ✅ All tests pass (auto-run by ensemble before disband)`,
-    `  2. ✅ All linters/typecheck clean (auto-run)`,
-    `  3. ✅ No new TODO/FIXME without one-line justification (diff-checked)`,
-    `  4. 🤝 Edge cases: list 3+ with file:line citations`,
-    `  5. 🤝 Revert plan: one line "to undo, do X"`,
-    `  6. 🤝 Observability: log/metric added if behavior changed (or note "no observable change")`,
-    `  7. 📱 High-risk paths (auth/payment/db migrations) → human approval before disband`,
+    `  1. ✅ Tests + typecheck + diff_check + attest checks (run mechanically by 🤖 verify-runner — see team feed for verdict)`,
+    `  2. 🤝 Edge cases: list 3+ with file:line citations (citations are auto-verified — fake refs = REJECTED)`,
+    `  3. 🤝 Revert plan: one line "to undo, do X"`,
+    `  4. 🤝 Observability: log/metric added if behavior changed (or note "no observable change")`,
+    `  5. 📱 High-risk paths (auth/payment/db migrations) → operator approval attestation required`,
     ``,
+    `🤖 verify-runner posts results as ensemble messages — read them BEFORE [VERIFY_DONE].`,
+    `If verify-runner says ❌ FAIL, the team has not converged regardless of agent opinions.`,
     `Hand-waved attestations ("looks good", "should work") are REJECTED.`,
+    `Cited file:line refs are automatically checked — confabulated cites trigger NO-GO.`,
     `Auto-FIX iterates up to 2× on any FAIL. After 2 fails → escalation, no disband.`,
     `---`,
   ].join('\n')

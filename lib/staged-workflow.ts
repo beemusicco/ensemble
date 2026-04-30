@@ -7,9 +7,12 @@ import type {
 import { appendMessage, getMessages } from './ensemble-registry'
 import { getRuntime, SessionGoneError } from './agent-runtime'
 import { resolveAgentProgram } from './agent-config'
-import { collabDeliveryFile } from './collab-paths'
+import { collabDeliveryFile, collabRuntimeDir } from './collab-paths'
 import { isSelf, getHostById } from './hosts-config'
 import { postRemoteSessionCommand } from './agent-spawner'
+import { loadBulletproofConfig } from './bulletproof-config'
+import { runVerifyChecks, formatVerifySummary, type VerifyRunSummary } from './verify-runner'
+import { scanCitations, findConfabulations, formatConfabulationWarning } from './confabulation-guard'
 import fs from 'fs'
 import path from 'path'
 
@@ -218,6 +221,13 @@ export class StagedWorkflowManager {
 
     this.resetCursor()
 
+    // 🛡️ Run mechanical bulletproof gate (auto-test runner) BEFORE delivering
+    // VERIFY prompts. Agents see the runner's verdict in the team feed before
+    // they sign off — they cannot mechanically claim "tests pass" if the gate
+    // says otherwise. The runner's summary becomes evidence for the auto-fix
+    // loop's blockers list.
+    let verifyRunSummary = await this.runMechanicalGate('initial')
+
     this.log('verify', 'Starting VERIFY phase — agents review each other\'s work')
     let verifyStartedAt = this.now().toISOString()
     await this.deliverPhasePrompts('verify', this.agents.map((agent, index) => async () => {
@@ -246,18 +256,33 @@ export class StagedWorkflowManager {
       )
     }
 
-    // Auto-fix loop: when VERIFY concludes NO-GO, re-run EXEC + VERIFY with
-    // the blockers list so the team self-resolves instead of stalling in a
-    // polite-ack loop until watchdog kills it. Bounded to maxFixIterations.
+    // After agent verify completes, scan their messages for confabulated
+    // file:line citations. Each warning is posted to the feed as evidence —
+    // confabulations also count toward NO-GO so the team can't sign off on
+    // hand-waved attestations.
+    let confabulationCount = await this.runConfabulationScan(verifyStartedAt)
+
+    // Auto-fix loop: when VERIFY concludes NO-GO (agent verdict OR mechanical
+    // gate FAIL OR confabulation), re-run EXEC + VERIFY with the blockers
+    // list so the team self-resolves instead of stalling in a polite-ack loop
+    // until watchdog kills it. Bounded to maxFixIterations.
     for (let iter = 1; iter <= this.config.maxFixIterations; iter++) {
       const verifyMessages = this.collectAgentMessagesSince(verifyStartedAt)
       const noGoSignals = verifyMessages.filter(m => hasNoGoMarker(m.content))
-      if (noGoSignals.length === 0) break  // verified clean — exit cleanly
+      const mechanicalFail = !!verifyRunSummary && (verifyRunSummary.failed > 0 || verifyRunSummary.errored > 0)
 
-      const blockersBlock = this.summarizeBlockers(verifyMessages)
+      // Exit cleanly only if EVERY signal source is clean: agents verified,
+      // mechanical gate passed (or wasn't configured), and no confabulations.
+      if (noGoSignals.length === 0 && !mechanicalFail && confabulationCount === 0) break
+
+      const blockersBlock = this.summarizeBlockers(verifyMessages, verifyRunSummary, confabulationCount)
+      const sources: string[] = []
+      if (noGoSignals.length > 0) sources.push(`${noGoSignals.length} agent NO-GO signal(s) from ${[...new Set(noGoSignals.map(m => m.from))].join(', ')}`)
+      if (mechanicalFail) sources.push(`mechanical gate: ${verifyRunSummary!.failed} fail / ${verifyRunSummary!.errored} error`)
+      if (confabulationCount > 0) sources.push(`${confabulationCount} confabulation warning(s)`)
       this.log(
         'exec',
-        `🔧 VERIFY concluded NO-GO (${noGoSignals.length} signal${noGoSignals.length === 1 ? '' : 's'} from ${[...new Set(noGoSignals.map(m => m.from))].join(', ')}) — entering FIX iteration ${iter}/${this.config.maxFixIterations}`,
+        `🔧 VERIFY did not converge (${sources.join('; ')}) — entering FIX iteration ${iter}/${this.config.maxFixIterations}`,
       )
 
       this.resetCursor()
@@ -280,6 +305,12 @@ export class StagedWorkflowManager {
       this.resetCursor()
       verifyStartedAt = this.now().toISOString()
       this.log('verify', `Re-running VERIFY after FIX iteration ${iter}/${this.config.maxFixIterations}`)
+
+      // Re-run mechanical gate before VERIFY prompts — if the agent fix landed
+      // properly, tests should now pass; if not, the runner will tell us
+      // immediately and the next iteration's prompt will reflect that.
+      verifyRunSummary = await this.runMechanicalGate(`fix-${iter}`)
+
       await this.deliverPhasePrompts('verify', this.agents.map((agent, index) => async () => {
         const teammates = this.agentNames().filter(name => name !== agent.name)
         const base = (this.options.buildVerifyPrompt || defaultVerifyPrompt)({
@@ -296,32 +327,159 @@ export class StagedWorkflowManager {
           this.config.verifyTimeoutMs,
         )
       }
+      confabulationCount = await this.runConfabulationScan(verifyStartedAt)
     }
 
-    // After the loop, if STILL NO-GO post the final escalation marker so the
-    // user / external observer sees that the team exhausted its auto-fix
-    // budget without converging. We do not disband here — let the normal
-    // signal-complete or watchdog handle the actual close.
+    // After the loop, if STILL not converged (agent NO-GO OR mechanical fail
+    // OR confabulation) post the final escalation marker so the user sees
+    // that the team exhausted its auto-fix budget. We do NOT disband here —
+    // signal-complete or watchdog handles the actual close.
     if (this.config.maxFixIterations > 0) {
       const finalVerifyMessages = this.collectAgentMessagesSince(verifyStartedAt)
       const stillNoGo = finalVerifyMessages.filter(m => hasNoGoMarker(m.content))
-      if (stillNoGo.length > 0) {
+      const stillMechFail = !!verifyRunSummary && (verifyRunSummary.failed > 0 || verifyRunSummary.errored > 0)
+      if (stillNoGo.length > 0 || stillMechFail || confabulationCount > 0) {
+        const reasons: string[] = []
+        if (stillNoGo.length > 0) reasons.push(`agent NO-GO from ${[...new Set(stillNoGo.map(m => m.from))].join(', ')}`)
+        if (stillMechFail) reasons.push(`mechanical gate FAIL (${verifyRunSummary!.failed} fail / ${verifyRunSummary!.errored} error)`)
+        if (confabulationCount > 0) reasons.push(`${confabulationCount} confabulation warning(s)`)
         appendMessage(this.options.team.id, {
           id: uuidv4(),
           teamId: this.options.team.id,
           from: 'ensemble',
           to: 'team',
-          content: `🚧 Auto-fix budget exhausted after ${this.config.maxFixIterations} iteration(s) — VERIFY still NO-GO. Team standing by for human direction or signal-complete.`,
+          content: `🚧 Auto-fix budget exhausted after ${this.config.maxFixIterations} iteration(s) — ${reasons.join('; ')}. Team standing by for human direction or signal-complete.`,
           type: 'chat',
           timestamp: this.now().toISOString(),
           meta: {
             event: 'auto_fix_exhausted',
             iterations: this.config.maxFixIterations,
             noGoSenders: [...new Set(stillNoGo.map(m => m.from))],
+            mechanicalFail: stillMechFail,
+            confabulationCount,
           },
         })
       }
     }
+  }
+
+  /**
+   * Locate the worktree path to run mechanical gate checks against. Order:
+   *   1. team.workingDirectory — the canonical "shared" project root
+   *   2. First active agent's worktreePath — if the team uses per-agent
+   *      worktrees and there's no shared root
+   *   3. null → skip the gate (no worktree to test)
+   */
+  private resolveCheckPath(): string | null {
+    const team = this.options.team as EnsembleTeam & { workingDirectory?: string }
+    if (team.workingDirectory && fs.existsSync(team.workingDirectory)) {
+      return team.workingDirectory
+    }
+    for (const agent of this.options.team.agents) {
+      const wp = (agent as { worktreePath?: string }).worktreePath
+      if (wp && fs.existsSync(wp)) return wp
+    }
+    return null
+  }
+
+  /**
+   * Run the mechanical bulletproof gate (verify-runner). Returns the summary
+   * (with pass/fail counts) or null if no checks were configured / runnable.
+   * Posts the formatted summary to the team feed.
+   *
+   * `phase` is a short label ("initial" / "fix-1" / "fix-2") used in the
+   * runtime log filename so we keep all the per-iteration logs.
+   */
+  private async runMechanicalGate(phase: string): Promise<VerifyRunSummary | null> {
+    const checkPath = this.resolveCheckPath()
+    if (!checkPath) return null
+
+    const cfg = loadBulletproofConfig(checkPath)
+    if (cfg.always.length === 0 && cfg.high_risk_extra.length === 0) {
+      // Nothing to run — surface that fact once so the operator knows the
+      // gate is silent (and can drop in a `.collab-bulletproof.json` to
+      // enable real checks).
+      if (phase === 'initial') {
+        this.log('verify', `🛡️ Mechanical gate: no checks configured for ${checkPath} (drop a .collab-bulletproof.json to enable).`)
+      }
+      return null
+    }
+
+    // Concatenate verify-phase messages so attest checks can search them.
+    const verifyMsgsConcat = this.messageCache
+      .filter(m => this.agentNames().includes(m.from))
+      .map(m => m.content)
+      .join('\n---\n')
+
+    try {
+      const fullLogPath = path.join(collabRuntimeDir(this.options.team.id), `verify-runner-${phase}.log`)
+      const summary = await runVerifyChecks({
+        cfg,
+        workingDirectory: checkPath,
+        verifyMessagesText: verifyMsgsConcat,
+        fullLogPath,
+      })
+      const formatted = formatVerifySummary(summary)
+      appendMessage(this.options.team.id, {
+        id: uuidv4(),
+        teamId: this.options.team.id,
+        from: 'ensemble',
+        to: 'team',
+        content: formatted,
+        type: 'chat',
+        timestamp: this.now().toISOString(),
+        meta: {
+          event: 'verify_runner',
+          phase,
+          passed: summary.passed,
+          failed: summary.failed,
+          errored: summary.errored,
+          highRiskHit: summary.highRiskHit,
+          configSource: summary.configSource,
+        },
+      })
+      return summary
+    } catch (err) {
+      this.log('verify', `🛡️ Mechanical gate threw: ${(err as Error).message} — skipping (treating as pass).`)
+      return null
+    }
+  }
+
+  /**
+   * Scan agent verify-phase messages for confabulated file:line citations.
+   * Posts a warning per confabulation and returns the count so the auto-fix
+   * loop can treat them as evidence that VERIFY did not converge.
+   */
+  private async runConfabulationScan(sinceTimestamp: string): Promise<number> {
+    const checkPath = this.resolveCheckPath()
+    if (!checkPath) return 0
+
+    const messages = this.collectAgentMessagesSince(sinceTimestamp)
+    if (messages.length === 0) return 0
+
+    let total = 0
+    const warnedKeys = new Set<string>()
+    for (const m of messages) {
+      const checks = scanCitations({ text: m.content, worktreePath: checkPath })
+      const confab = findConfabulations(checks)
+      for (const c of confab) {
+        const key = `${m.from}::${c.rawCitation}`
+        if (warnedKeys.has(key)) continue
+        warnedKeys.add(key)
+        appendMessage(this.options.team.id, {
+          id: uuidv4(),
+          teamId: this.options.team.id,
+          from: 'ensemble',
+          to: 'team',
+          content: formatConfabulationWarning(m.from, c),
+          type: 'chat',
+          timestamp: this.now().toISOString(),
+          meta: { event: 'confabulation', agent: m.from, citation: c.rawCitation },
+        })
+        total++
+      }
+    }
+    return total
   }
 
   private collectAgentMessagesSince(sinceTimestamp: string): ReturnType<typeof getMessages> {
@@ -330,7 +488,11 @@ export class StagedWorkflowManager {
     return all.filter(m => agentNames.has(m.from))
   }
 
-  private summarizeBlockers(verifyMessages: ReturnType<typeof getMessages>): string {
+  private summarizeBlockers(
+    verifyMessages: ReturnType<typeof getMessages>,
+    runSummary?: VerifyRunSummary | null,
+    confabulationCount = 0,
+  ): string {
     // Pull lines that look like blocker enumerations from each verify-phase
     // message. Heuristic: lines starting with a marker (•, *, -, 1.) OR
     // containing "blocker" / "no-go" / "fail" / "reject". Cap to 12 entries
@@ -348,8 +510,34 @@ export class StagedWorkflowManager {
       }
       if (lines.length >= 12) break
     }
-    if (lines.length === 0) return '  (no structured blockers extracted — re-read the most recent VERIFY messages via team-read for context)'
-    return lines.join('\n')
+
+    // Append mechanical gate failures — the team needs to see WHICH check
+    // failed and the (truncated) output. Keep mech-gate failures separate
+    // from agent narrative blockers so the FIX prompt segments cleanly.
+    const mechBlock: string[] = []
+    if (runSummary && (runSummary.failed > 0 || runSummary.errored > 0)) {
+      mechBlock.push(`🛡️ Mechanical gate failures (auto-runner — these are authoritative, agents cannot hand-wave them):`)
+      for (const r of runSummary.results) {
+        if (r.status === 'pass' || r.status === 'skip') continue
+        const head = `  ❌ ${r.id} (${r.type}${r.exitCode !== null ? `, exit=${r.exitCode}` : ''}${r.reason ? `, ${r.reason}` : ''})`
+        mechBlock.push(head)
+        if (r.output) {
+          // Indent + cap output to keep the FIX prompt readable.
+          const tail = r.output.split('\n').slice(-15).map(l => `      ${l}`).join('\n')
+          mechBlock.push(tail)
+        }
+      }
+    }
+
+    if (confabulationCount > 0) {
+      mechBlock.push(`🔍 Confabulation: ${confabulationCount} cited file:line(s) do not resolve in the worktree. Re-cite with verifiable references or remove the claim.`)
+    }
+
+    const combined: string[] = []
+    if (lines.length > 0) combined.push(lines.join('\n'))
+    if (mechBlock.length > 0) combined.push(mechBlock.join('\n'))
+    if (combined.length === 0) return '  (no structured blockers extracted — re-read the most recent VERIFY messages via team-read for context)'
+    return combined.join('\n\n')
   }
 
   /**
