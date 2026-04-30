@@ -26,6 +26,7 @@ import {
   collabBridgeResult, ensureCollabDirs, collabMessagesFile,
 } from '../lib/collab-paths'
 import { queryMemories, queryMemoriesSemantic, writeMemory } from '../lib/memory-store'
+import { readProjectConfigText } from '../lib/project-config'
 import { scanAndAnswerUnknowns, flagAssumptions } from '../lib/unknown-watcher'
 import { scanAndDispatchQuestions, answerQuestion, type AnswerInput, type AnswerResult } from '../lib/question-watcher'
 import { appendCostEntry } from '../lib/cost-ledger'
@@ -1265,30 +1266,29 @@ async function runLlmLessonExtraction(
 }
 
 /**
- * Read the optional `.collab-tools.md` file at the repo root. This is a free-form
- * markdown doc the operator drops at the project root to tell agents the
- * project-specific tools they should use (e.g. "lint=ruff not flake8",
- * "test=vitest", "dev=bun run dev"). The full body is injected into the
- * prompt verbatim; we cap the size so a runaway file can't bloat the prompt.
+ * Read the optional `.collab-tools.md` config — free-form markdown the
+ * operator drops to tell agents the project-specific tools they should use
+ * (e.g. "lint=ruff not flake8", "test=vitest", "dev=bun run dev"). The body
+ * is injected into the prompt verbatim; size capped so a runaway file can't
+ * bloat the prompt.
  *
- * Returns null when the file doesn't exist — caller skips the block entirely.
+ * Resolution order (W2.5b): operator-config dir first
+ * (`~/.openclaw/collab-config/<repo-basename>/.collab-tools.md`) then repo
+ * root. This lets operators keep collab config out of git without losing
+ * the per-project guidance — see lib/project-config.ts for full rationale.
+ *
+ * Returns null when neither tier has the file — caller skips the block.
  */
 const COLLAB_TOOLS_MAX_BYTES = 4_000  // ~700 tokens — enough for a tight tool index
 function loadProjectToolIndex(workingDirectory?: string): string | null {
-  if (!workingDirectory) return null
-  try {
-    const file = path.join(workingDirectory, '.collab-tools.md')
-    if (!fs.existsSync(file)) return null
-    const raw = fs.readFileSync(file, 'utf-8')
-    const trimmed = raw.trim()
-    if (!trimmed) return null
-    if (trimmed.length > COLLAB_TOOLS_MAX_BYTES) {
-      return trimmed.slice(0, COLLAB_TOOLS_MAX_BYTES) + '\n…[truncated — keep .collab-tools.md under 4KB]'
-    }
-    return trimmed
-  } catch {
-    return null
+  const found = readProjectConfigText('.collab-tools.md', workingDirectory)
+  if (!found) return null
+  const trimmed = found.text.trim()
+  if (!trimmed) return null
+  if (trimmed.length > COLLAB_TOOLS_MAX_BYTES) {
+    return trimmed.slice(0, COLLAB_TOOLS_MAX_BYTES) + '\n…[truncated — keep .collab-tools.md under 4KB]'
   }
+  return trimmed
 }
 
 /**

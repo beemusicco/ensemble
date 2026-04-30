@@ -32,6 +32,7 @@
 
 import fs from 'fs'
 import path from 'path'
+import { findProjectConfigPath } from './project-config'
 
 /**
  * Tiny gitignore-style glob matcher. Handles double-star (any depth), single-star
@@ -203,10 +204,13 @@ export function loadBulletproofConfig(workingDirectory: string | undefined): Bul
   const empty: BulletproofConfig = { always: [], high_risk_paths: [], high_risk_extra: [], source: 'empty' }
   if (!workingDirectory) return empty
 
-  const file = path.join(workingDirectory, FILENAME)
-  if (fs.existsSync(file)) {
+  // W2.5b: resolve via operator-config dir → repo root, in that order.
+  // Operator-config wins so per-machine tuning isn't shadowed by a stale
+  // checked-in copy at the repo root.
+  const resolved = findProjectConfigPath(FILENAME, workingDirectory)
+  if (resolved) {
     try {
-      const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>
+      const parsed = JSON.parse(fs.readFileSync(resolved.path, 'utf-8')) as Record<string, unknown>
       return {
         always: normalizeChecks(parsed.always),
         high_risk_paths: normalizePaths(parsed.high_risk_paths),
@@ -214,7 +218,7 @@ export function loadBulletproofConfig(workingDirectory: string | undefined): Bul
         source: 'file',
       }
     } catch (err) {
-      console.warn(`[bulletproof] Failed to parse ${file}: ${(err as Error).message} — falling back to auto-detect`)
+      console.warn(`[bulletproof] Failed to parse ${resolved.path}: ${(err as Error).message} — falling back to auto-detect`)
     }
   }
 
