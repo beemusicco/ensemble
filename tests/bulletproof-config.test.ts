@@ -105,4 +105,97 @@ describe('bulletproof-config', () => {
     expect(hit.highRiskHit).toBe('scripts/migrations/2026/up.sql')
     expect(hit.checks).toHaveLength(1)
   })
+
+  // ── W2.5c: monorepo-aware auto-detect ─────────────────────────────────
+
+  it('detects pytest in subproject (backend/) for monorepo layouts', () => {
+    fs.mkdirSync(path.join(tmpDir, 'backend'))
+    fs.writeFileSync(path.join(tmpDir, 'backend/pyproject.toml'), '[project]\n')
+    const cfg = loadBulletproofConfig(tmpDir)
+    expect(cfg.source).toBe('auto-detected')
+    const pytest = cfg.always.find(c => c.id === 'pytest-backend')
+    expect(pytest).toBeDefined()
+    expect(pytest!.cmd).toMatch(/cd backend &&/)
+    expect(pytest!.cmd).toMatch(/not e2e and not slow/)
+  })
+
+  it('detects npm test in subproject (frontend/) for monorepo layouts', () => {
+    fs.mkdirSync(path.join(tmpDir, 'frontend'))
+    fs.writeFileSync(path.join(tmpDir, 'frontend/package.json'), JSON.stringify({
+      name: 'fe', scripts: { test: 'vitest run', lint: 'eslint .', typecheck: 'tsc --noEmit' },
+    }))
+    const cfg = loadBulletproofConfig(tmpDir)
+    expect(cfg.source).toBe('auto-detected')
+    expect(cfg.always.find(c => c.id === 'npm-test-frontend')).toBeDefined()
+    expect(cfg.always.find(c => c.id === 'lint-frontend')).toBeDefined()
+    expect(cfg.always.find(c => c.id === 'typecheck-frontend')).toBeDefined()
+  })
+
+  it('emits diff-scoped ruff when pyproject.toml mentions ruff', () => {
+    fs.mkdirSync(path.join(tmpDir, 'backend'))
+    fs.writeFileSync(path.join(tmpDir, 'backend/pyproject.toml'),
+      '[project]\ndependencies = ["ruff>=0.8"]\n[tool.ruff]\n')
+    const cfg = loadBulletproofConfig(tmpDir)
+    const ruff = cfg.always.find(c => c.id === 'ruff-diff-backend')
+    expect(ruff).toBeDefined()
+    expect(ruff!.cmd).toMatch(/git diff HEAD --name-only --diff-filter=ACMR/)
+    expect(ruff!.cmd).toMatch(/git ls-files --others --exclude-standard/)
+    expect(ruff!.cmd).toMatch(/xargs -0 -r ruff check/)
+  })
+
+  it('does NOT emit ruff when pyproject.toml has no ruff dependency', () => {
+    fs.mkdirSync(path.join(tmpDir, 'backend'))
+    fs.writeFileSync(path.join(tmpDir, 'backend/pyproject.toml'),
+      '[project]\ndependencies = ["pytest>=8"]\n')
+    const cfg = loadBulletproofConfig(tmpDir)
+    expect(cfg.always.find(c => c.id?.startsWith('ruff'))).toBeUndefined()
+  })
+
+  it('handles full monorepo: backend (Python+ruff) + frontend (Node)', () => {
+    fs.mkdirSync(path.join(tmpDir, 'backend'))
+    fs.writeFileSync(path.join(tmpDir, 'backend/pyproject.toml'),
+      '[project]\ndependencies=["ruff>=0.8"]\n[tool.ruff]\n')
+    fs.mkdirSync(path.join(tmpDir, 'frontend'))
+    fs.writeFileSync(path.join(tmpDir, 'frontend/package.json'), JSON.stringify({
+      name: 'fe', scripts: { test: 'vitest run', lint: 'eslint .' },
+    }))
+    const cfg = loadBulletproofConfig(tmpDir)
+    const ids = cfg.always.map(c => c.id)
+    expect(ids).toContain('pytest-backend')
+    expect(ids).toContain('ruff-diff-backend')
+    expect(ids).toContain('npm-test-frontend')
+    expect(ids).toContain('lint-frontend')
+  })
+
+  it('skips noisy subdirs (node_modules, .venv, dist, .git)', () => {
+    for (const skip of ['node_modules', '.venv', 'dist', '.git', '__pycache__']) {
+      fs.mkdirSync(path.join(tmpDir, skip))
+      fs.writeFileSync(path.join(tmpDir, skip, 'package.json'), JSON.stringify({
+        name: 'noise', scripts: { test: 'echo never run' },
+      }))
+    }
+    const cfg = loadBulletproofConfig(tmpDir)
+    // None of the noise should show up as detected checks
+    for (const id of cfg.always.map(c => c.id)) {
+      expect(id).not.toMatch(/node_modules|venv|dist/)
+    }
+  })
+
+  it('detects Cargo + Go projects', () => {
+    fs.mkdirSync(path.join(tmpDir, 'rust-svc'))
+    fs.writeFileSync(path.join(tmpDir, 'rust-svc/Cargo.toml'), '[package]\n')
+    fs.mkdirSync(path.join(tmpDir, 'go-svc'))
+    fs.writeFileSync(path.join(tmpDir, 'go-svc/go.mod'), 'module x\n')
+    const cfg = loadBulletproofConfig(tmpDir)
+    expect(cfg.always.find(c => c.id === 'cargo-test-rust_svc')).toBeDefined()
+    expect(cfg.always.find(c => c.id === 'go-test-go_svc')).toBeDefined()
+  })
+
+  it('still works for single-project root (back-compat)', () => {
+    fs.writeFileSync(path.join(tmpDir, 'pyproject.toml'), '[project]\n')
+    const cfg = loadBulletproofConfig(tmpDir)
+    expect(cfg.source).toBe('auto-detected')
+    // Root-level check has no subdir suffix
+    expect(cfg.always.find(c => c.id === 'pytest')).toBeDefined()
+  })
 })

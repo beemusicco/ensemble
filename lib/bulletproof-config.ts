@@ -146,58 +146,163 @@ function normalizePaths(raw: unknown): string[] {
 
 /**
  * Auto-detect a minimal set of always-checks based on what's in the
- * workingDirectory. Used when no `.collab-bulletproof.json` is present.
+ * workingDirectory + one level of subdirs. Used when no
+ * `.collab-bulletproof.json` is present in either operator-config or repo root.
  *
- * The detection is intentionally conservative — better to skip a check than
- * to wedge VERIFY on a project where the assumed command doesn't exist. The
- * operator can always commit a `.collab-bulletproof.json` for full control.
+ * W2.5c: walks ONE level deep so monorepos (`backend/pyproject.toml` +
+ * `frontend/package.json`) work without explicit config. Each detected
+ * subproject contributes `cd <subdir> && <cmd>` checks. Skips obvious noise
+ * dirs (node_modules, .venv, .git, dist, etc.).
+ *
+ * Diff-scoped commands by default (W2.5 lesson, collab f652ac34): ruff +
+ * pytest run only against changed files / not-slow tests so pre-existing
+ * master debt doesn't fail every gate.
+ *
+ * The detection stays conservative — skips when the assumed command doesn't
+ * fit (e.g. package.json with placeholder test script). Operator can always
+ * drop an explicit `.collab-bulletproof.json` in the operator-config dir
+ * for full control.
  */
+
+const SUBDIR_SKIP = new Set([
+  'node_modules', '.git', '.venv', 'venv', '.pytest_cache', '.mypy_cache',
+  '.ruff_cache', '.next', '.cache', '.turbo', '.parcel-cache', '.gradle',
+  '.idea', '.vscode', 'dist', 'build', 'target', '.worktrees', 'coverage',
+  '__pycache__', 'vendor', '.tox', '.nox', '.eggs', '.benchmarks',
+  '.history', 'storage', 'tmp', 'temp', '.DS_Store',
+])
+
 function autoDetect(workingDirectory: string): BulletproofCheck[] {
   const checks: BulletproofCheck[] = []
-  const exists = (rel: string): boolean => {
-    try { return fs.existsSync(path.join(workingDirectory, rel)) } catch { return false }
+
+  // Detect at the root first (covers single-project repos).
+  detectInDir(workingDirectory, '', checks)
+
+  // Then walk one level deep — monorepo subprojects.
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(workingDirectory, { withFileTypes: true })
+  } catch { return checks }
+
+  for (const e of entries) {
+    if (!e.isDirectory()) continue
+    if (SUBDIR_SKIP.has(e.name)) continue
+    if (e.name.startsWith('.')) continue  // skip hidden dirs by default
+    const subAbs = path.join(workingDirectory, e.name)
+    detectInDir(subAbs, e.name, checks)
   }
 
-  // Python: pytest if conftest.py / pyproject.toml / pytest.ini / tests dir.
-  if (exists('pyproject.toml') || exists('pytest.ini') || exists('conftest.py') || exists('tests')) {
-    checks.push({
-      id: 'pytest',
-      type: 'cmd',
-      cmd: 'pytest -q --no-header -x --maxfail=3',
-      timeoutMs: 180_000,
-    })
+  return checks
+}
+
+/**
+ * Detect runnable verifications in a single dir. `prefix` is the relative
+ * path from the team's workingDirectory; empty string means we're at root.
+ * Each check's cmd is wrapped with `cd <prefix> && ...` when non-root.
+ */
+function detectInDir(absDir: string, prefix: string, checks: BulletproofCheck[]): void {
+  const exists = (rel: string): boolean => {
+    try { return fs.existsSync(path.join(absDir, rel)) } catch { return false }
   }
-  // OpenClaw repos commonly have scripts/verify_system.py — trust if present.
-  if (exists('scripts/verify_system.py')) {
+  const cdPrefix = prefix ? `cd ${prefix} && ` : ''
+  const idSuffix = prefix ? `-${prefix.replace(/[^a-z0-9]+/gi, '_')}` : ''
+
+  // Python: pytest if pyproject.toml / pytest.ini / conftest.py.
+  // (Don't trigger on `tests/` directory alone — Node/Rust/Go projects
+  // also use `tests/`, would false-positive pytest on them.)
+  if (exists('pyproject.toml') || exists('pytest.ini') || exists('conftest.py')) {
     checks.push({
-      id: 'verify-system',
+      id: `pytest${idSuffix}`,
       type: 'cmd',
-      cmd: 'python3 scripts/verify_system.py',
+      cmd: `${cdPrefix}pytest -q --no-header -x --maxfail=3 -m 'not e2e and not slow'`,
       timeoutMs: 240_000,
     })
   }
-  // Node: prefer `npm test` if package.json declares a test script.
+
+  // ruff (Python lint) — only if pyproject.toml mentions ruff. Diff-scoped:
+  // git diff (committed changes since branch base) + git ls-files --others
+  // (untracked) → only NEW lint debt fires the gate, master debt doesn't.
+  if (exists('pyproject.toml')) {
+    try {
+      const py = fs.readFileSync(path.join(absDir, 'pyproject.toml'), 'utf-8')
+      if (/(^|\n)\[tool\.ruff\b|"ruff"\s*[:=]|ruff\s*[>=<]/i.test(py)) {
+        checks.push({
+          id: `ruff-diff${idSuffix}`,
+          type: 'cmd',
+          // Note: git is repo-rooted, so diff from inside subdir naturally
+          // returns paths relative to that subdir. Works for both root and subprojects.
+          cmd: `${cdPrefix}(git diff HEAD --name-only --diff-filter=ACMR -- '*.py'; git ls-files --others --exclude-standard -- '*.py') | sort -u | tr '\\n' '\\0' | xargs -0 -r ruff check`,
+          timeoutMs: 60_000,
+        })
+      }
+    } catch { /* malformed pyproject — skip */ }
+  }
+
+  // OpenClaw repos: scripts/verify_system.py
+  if (exists('scripts/verify_system.py')) {
+    checks.push({
+      id: `verify-system${idSuffix}`,
+      type: 'cmd',
+      cmd: `${cdPrefix}python3 scripts/verify_system.py`,
+      timeoutMs: 240_000,
+    })
+  }
+
+  // Node: npm test + npm run typecheck if defined and not the default placeholder.
   if (exists('package.json')) {
     try {
-      const pkg = JSON.parse(fs.readFileSync(path.join(workingDirectory, 'package.json'), 'utf-8'))
-      const hasTest = pkg?.scripts?.test && !/no test specified/i.test(String(pkg.scripts.test))
+      const pkg = JSON.parse(fs.readFileSync(path.join(absDir, 'package.json'), 'utf-8'))
+      const testScript: string | undefined = pkg?.scripts?.test
+      const hasTest = !!testScript && !/no test specified/i.test(String(testScript))
       if (hasTest) {
         checks.push({
-          id: 'npm-test',
+          id: `npm-test${idSuffix}`,
           type: 'cmd',
-          cmd: 'npm test --silent',
+          cmd: `${cdPrefix}npm test --silent`,
           timeoutMs: 240_000,
         })
       }
       const hasTypecheck = pkg?.scripts?.typecheck || pkg?.scripts?.['type-check']
       if (hasTypecheck) {
-        const cmd = pkg.scripts.typecheck ? 'npm run typecheck --silent' : 'npm run type-check --silent'
-        checks.push({ id: 'typecheck', type: 'cmd', cmd, timeoutMs: 120_000 })
+        const which = pkg.scripts.typecheck ? 'typecheck' : 'type-check'
+        checks.push({
+          id: `typecheck${idSuffix}`,
+          type: 'cmd',
+          cmd: `${cdPrefix}npm run ${which} --silent`,
+          timeoutMs: 120_000,
+        })
+      }
+      const hasLint = pkg?.scripts?.lint
+      if (hasLint) {
+        checks.push({
+          id: `lint${idSuffix}`,
+          type: 'cmd',
+          cmd: `${cdPrefix}npm run lint --silent`,
+          timeoutMs: 120_000,
+        })
       }
     } catch { /* malformed package.json — skip */ }
   }
 
-  return checks
+  // Rust
+  if (exists('Cargo.toml')) {
+    checks.push({
+      id: `cargo-test${idSuffix}`,
+      type: 'cmd',
+      cmd: `${cdPrefix}cargo test --quiet`,
+      timeoutMs: 300_000,
+    })
+  }
+
+  // Go
+  if (exists('go.mod')) {
+    checks.push({
+      id: `go-test${idSuffix}`,
+      type: 'cmd',
+      cmd: `${cdPrefix}go test ./...`,
+      timeoutMs: 240_000,
+    })
+  }
 }
 
 export function loadBulletproofConfig(workingDirectory: string | undefined): BulletproofConfig {
