@@ -814,7 +814,7 @@ function buildChallengeBlock(mode: 'normal' | 'rigorous' | 'sparring'): string {
 //
 // Each entry tagged with its owning project. Memories whose tags include
 // ANY of the OTHER project's domain tags are excluded.
-const PROJECT_DOMAIN_TAGS: Record<string, ReadonlySet<string>> = {
+export const PROJECT_DOMAIN_TAGS: Record<string, ReadonlySet<string>> = {
   'accounting-helper': new Set([
     'accounting-helper', 'libro', 'postmark', 'intake', 'sectionheader',
     'invoice-events', 'erp-sync', 'bank_sync',
@@ -1265,6 +1265,33 @@ async function runLlmLessonExtraction(
 }
 
 /**
+ * Read the optional `.collab-tools.md` file at the repo root. This is a free-form
+ * markdown doc the operator drops at the project root to tell agents the
+ * project-specific tools they should use (e.g. "lint=ruff not flake8",
+ * "test=vitest", "dev=bun run dev"). The full body is injected into the
+ * prompt verbatim; we cap the size so a runaway file can't bloat the prompt.
+ *
+ * Returns null when the file doesn't exist — caller skips the block entirely.
+ */
+const COLLAB_TOOLS_MAX_BYTES = 4_000  // ~700 tokens — enough for a tight tool index
+function loadProjectToolIndex(workingDirectory?: string): string | null {
+  if (!workingDirectory) return null
+  try {
+    const file = path.join(workingDirectory, '.collab-tools.md')
+    if (!fs.existsSync(file)) return null
+    const raw = fs.readFileSync(file, 'utf-8')
+    const trimmed = raw.trim()
+    if (!trimmed) return null
+    if (trimmed.length > COLLAB_TOOLS_MAX_BYTES) {
+      return trimmed.slice(0, COLLAB_TOOLS_MAX_BYTES) + '\n…[truncated — keep .collab-tools.md under 4KB]'
+    }
+    return trimmed
+  } catch {
+    return null
+  }
+}
+
+/**
  * Read the optional .collab-protect file at the repo root and return a list
  * of patterns. Each non-empty, non-comment line is a glob the agent must NOT
  * edit. Used by buildPromptPreview to inject a "PROTECTED FILES" block.
@@ -1441,6 +1468,17 @@ export function buildPromptPreview(params: {
     `---`,
   ].join('\n')
 
+  // 🛠 W4 Project tool index — when the repo ships `.collab-tools.md`, inject
+  // it verbatim. Agents save discovery time + avoid wrong-tool errors (e.g.
+  // running `npm test` in a bun project, or `pytest` when the project uses
+  // unittest). The doc author owns the contract; we just paste it.
+  const projectTools = loadProjectToolIndex(params.workingDirectory)
+  const projectToolsBlock = !projectTools ? '' : [
+    `🛠 PROJECT TOOLS — what to actually run in this repo (verbatim from .collab-tools.md):`,
+    projectTools,
+    `---`,
+  ].join('\n')
+
   // Bulletproof gate + learn-on-demand: always present. Agents see them
   // alongside expert + challenge culture so the verification floor and
   // hallucination escape hatches are visible from message #1.
@@ -1454,6 +1492,7 @@ export function buildPromptPreview(params: {
     bulletproofBlock,
     learnOnDemandBlock,
     protectBlock,
+    projectToolsBlock,
     `You are ${params.agentName} in team "${params.teamName}" with teammate ${params.teammateNames.join(', ')}.`,
     `Task: ${safeDescription}`,
     ...roleInstructions,

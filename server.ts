@@ -18,6 +18,7 @@ import {
   type MemoryScope,
 } from './lib/memory-store'
 import { teamResearch, formatResearchOutput } from './lib/team-research'
+import { computeCalibration, formatCalibrationText } from './lib/calibration'
 
 const SERVER_VERSION = '1.0.0'
 
@@ -367,6 +368,24 @@ const server = http.createServer(async (req, res) => {
       const fromLabel = typeof body.fromLabel === 'string' ? body.fromLabel : undefined
       const result = answerPendingQuestion({ questionId, answer, fromLabel })
       return json(res, result.data, result.status, origin)
+    }
+
+    // Calibration scoreboard: /api/ensemble/calibration?windowDays=N&maxTeams=N&format=text|json
+    if (path === '/api/ensemble/calibration' && method === 'GET') {
+      const windowDaysParam = url.searchParams.get('windowDays')
+      const windowDays = windowDaysParam ? Math.max(1, Math.min(parseInt(windowDaysParam, 10) || 30, 365)) : undefined
+      const maxTeamsParam = url.searchParams.get('maxTeams')
+      const maxTeams = maxTeamsParam ? Math.max(1, Math.min(parseInt(maxTeamsParam, 10) || 500, 2000)) : undefined
+      const summary = computeCalibration({ windowDays, maxTeams })
+      const wantsText = (url.searchParams.get('format') || '').toLowerCase() === 'text'
+      if (wantsText) {
+        res.statusCode = 200
+        res.setHeader('content-type', 'text/plain; charset=utf-8')
+        if (origin) res.setHeader('access-control-allow-origin', origin)
+        res.end(formatCalibrationText(summary))
+        return
+      }
+      return json(res, summary, 200, origin)
     }
 
     // Agent-callable research: /api/ensemble/research?q=<query>&url=<optional>&format=text|json

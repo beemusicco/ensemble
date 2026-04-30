@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Weekly memory consolidation pass for ensemble — DRY RUN by default.
+  Reviews near-duplicate memories, asks Haiku to propose merges, writes the
+  report to ~/logs/ensemble-memory-consolidate.log so the operator can audit
+  before applying.
+
+  To enable APPLY mode (commit merges, delete originals), edit the
+  ProgramArguments below to add `--apply`. Default keeps the operator in the
+  loop so a bad similarity threshold can't silently nuke memories.
+
+  Install:
+    sed "s|HOME_PLACEHOLDER|$HOME|g" launchd/co.openclaw.ensemble-memory-consolidate.plist.template > ~/Library/LaunchAgents/co.openclaw.ensemble-memory-consolidate.plist
+    launchctl load ~/Library/LaunchAgents/co.openclaw.ensemble-memory-consolidate.plist
+
+  Schedule: every Sunday at 04:00 local time (low-traffic window).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>co.openclaw.ensemble-memory-consolidate</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>HOME_PLACEHOLDER/.openclaw/tools/ensemble/scripts/memory-consolidate.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>HOME_PLACEHOLDER/.openclaw/tools/ensemble</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>HOME_PLACEHOLDER/logs/ensemble-memory-consolidate.log</string>
+    <key>StandardErrorPath</key>
+    <string>HOME_PLACEHOLDER/logs/ensemble-memory-consolidate.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>HOME_PLACEHOLDER</string>
+    </dict>
+</dict>
+</plist>
