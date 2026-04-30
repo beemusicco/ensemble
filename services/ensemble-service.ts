@@ -100,6 +100,26 @@ const STANDING_BY_PATTERNS = [
 ]
 const STANDING_BY_IDLE_MS = parseEnvMs('ENSEMBLE_STANDING_BY_IDLE_MS', 10 * 60 * 1000)
 
+// W2.5d (Fix A): when an agent emits [READY-TO-MERGE], they're saying
+// "human, take it from here" — premium-quad/ultrareview templates explicitly
+// instruct this pattern. The team correctly goes silent, but watchdog
+// can't distinguish "idle CLI prompt" from "long-running command in flight"
+// (both show non-shell foreground), so it defers all-stalled disband and
+// the team sits zombie until lifetime cap (90 min). 5-min silence after
+// the signal is enough buffer for last-minute objections.
+const READY_TO_MERGE_RE = /\[READY[-_ ]TO[-_ ]MERGE\]/i
+const READY_LOCAL_NO_GO_RE = /\bNO[-_ ]GO\b|\bNOT[-_ ]APPROVED\b/i
+const READY_TO_MERGE_QUIET_MS = parseEnvMs('ENSEMBLE_READY_QUIET_MS', 5 * 60 * 1000)
+
+// W2.5d (Fix B): soft lifetime cap. The hard 90-min cap protects against
+// runaway zombie teams, but real collabs that hit 60 min idle for 15+ min
+// are almost always done — operator forgot to disband, or agents are at
+// idle CLI prompts. Soft cap fires earlier than hard cap WITH an idle
+// condition, so legit long-running sessions (75 min of active work) are
+// not killed.
+const SOFT_LIFETIME_CAP_MS = parseEnvMs('ENSEMBLE_SOFT_LIFETIME_CAP_MS', 60 * 60 * 1000)
+const SOFT_LIFETIME_IDLE_MS = parseEnvMs('ENSEMBLE_SOFT_LIFETIME_IDLE_MS', 15 * 60 * 1000)
+
 // FIX 1: bracket tag must occupy a message edge to count as a sign-off. The
 // start anchor only allows whitespace before the tag (so "[DONE]" or "  [DONE]
 // my part" matches, but "as instructed emit [DONE] when ready" does not). The
@@ -303,6 +323,47 @@ class EnsembleService {
     const lastAgentMsg = agentMsgs[agentMsgs.length - 1]
     const lastTs = lastAgentMsg.timestamp ? new Date(lastAgentMsg.timestamp).getTime() : 0
     const idleMs = lastTs ? now - lastTs : 0
+
+    // W2.5d Fix A: [READY-TO-MERGE] from any agent + 5min quiet → disband.
+    // Premium-quad / ultrareview templates instruct agents to emit this and
+    // wait for human merge. Team correctly goes silent; watchdog defers
+    // because foreground != shell. Without this path, team sits zombie
+    // until the 90-min hard cap.
+    const lastReadyMsg = [...agentMsgs].reverse().find(m => READY_TO_MERGE_RE.test(m.content || ''))
+    if (lastReadyMsg) {
+      const readyTs = lastReadyMsg.timestamp ? new Date(lastReadyMsg.timestamp).getTime() : 0
+      // Honor any post-ready dissent (NO-GO / NOT APPROVED) — someone
+      // disagreed AFTER the merge signal, don't auto-disband on stale ready.
+      const dissent = agentMsgs.find(m => {
+        const ts = m.timestamp ? new Date(m.timestamp).getTime() : 0
+        return ts > readyTs && READY_LOCAL_NO_GO_RE.test(m.content || '')
+      })
+      if (!dissent) {
+        const idleSinceReady = readyTs ? now - readyTs : 0
+        if (idleSinceReady > READY_TO_MERGE_QUIET_MS) {
+          return {
+            reason: `ready-to-merge: ${lastReadyMsg.from} signaled + ${Math.round(idleSinceReady / 60_000)}min quiet`,
+            ageMs,
+            idleMs: idleSinceReady,
+          }
+        }
+      }
+    }
+
+    // W2.5d Fix B: soft lifetime cap with idle condition. Catches teams
+    // that hit ~60 min and went quiet, before the 90-min hard cap. Active
+    // long-running sessions stay alive because idleMs < threshold.
+    if (
+      SOFT_LIFETIME_CAP_MS > 0 &&
+      ageMs > SOFT_LIFETIME_CAP_MS &&
+      idleMs > SOFT_LIFETIME_IDLE_MS
+    ) {
+      return {
+        reason: `soft-cap: ${Math.round(ageMs / 60_000)}min age + ${Math.round(idleMs / 60_000)}min idle (>${Math.round(SOFT_LIFETIME_CAP_MS / 60_000)}min/${Math.round(SOFT_LIFETIME_IDLE_MS / 60_000)}min thresholds)`,
+        ageMs,
+        idleMs,
+      }
+    }
 
     if (idleMs > STANDING_BY_IDLE_MS) {
       const recent = agentMsgs.slice(-5)
