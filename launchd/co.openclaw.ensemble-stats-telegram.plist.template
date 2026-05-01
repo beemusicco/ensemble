@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Weekly Telegram digest of ensemble calibration scoreboard.
+  Sends a 7-day rollup (per-agent + per-program metrics) to operator's
+  Telegram every Monday 09:00 local. No-op if no Telegram bot token.
+
+  Install:
+    sed "s|HOME_PLACEHOLDER|$HOME|g" launchd/co.openclaw.ensemble-stats-telegram.plist.template > ~/Library/LaunchAgents/co.openclaw.ensemble-stats-telegram.plist
+    launchctl load ~/Library/LaunchAgents/co.openclaw.ensemble-stats-telegram.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>co.openclaw.ensemble-stats-telegram</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>HOME_PLACEHOLDER/.openclaw/tools/ensemble/scripts/team-stats-telegram.sh</string>
+        <string>--window=7</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>HOME_PLACEHOLDER/.openclaw/tools/ensemble</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>HOME_PLACEHOLDER/logs/ensemble-stats-telegram.log</string>
+    <key>StandardErrorPath</key>
+    <string>HOME_PLACEHOLDER/logs/ensemble-stats-telegram.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>HOME_PLACEHOLDER</string>
+    </dict>
+</dict>
+</plist>

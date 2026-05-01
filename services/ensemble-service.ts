@@ -124,6 +124,27 @@ const READY_TO_MERGE_QUIET_MS = parseEnvMs('ENSEMBLE_READY_QUIET_MS', 5 * 60 * 1
 const READY_TO_MERGE_SOLO_QUIET_MS = parseEnvMs('ENSEMBLE_READY_SOLO_QUIET_MS', 30 * 60 * 1000)
 const READY_TO_MERGE_MIN_AGE_MS = parseEnvMs('ENSEMBLE_READY_MIN_AGE_MS', 10 * 60 * 1000)
 
+/**
+ * W2.5f: Selective auto-merge based on disband reason.
+ *
+ * Auto-merging worktrees on EVERY disband (regardless of why) is silent
+ * pollution: when the team is killed by lifetime-cap / soft-cap / manual /
+ * watchdog, the work-in-progress in each agent's worktree gets fast-forward
+ * merged into master before the operator has a chance to review it. This
+ * happened with collab 25f8bf58 (TDD scaffolds shipped to master).
+ *
+ * Rule: merge only when the team explicitly signaled completion. Otherwise
+ * preserve every worktree and surface a recovery alert with manual merge
+ * commands. The operator chooses what (if anything) to merge.
+ */
+function isDisbandCompletionConfirmed(reason: string): boolean {
+  return (
+    reason.startsWith('ready-to-merge:') ||
+    reason.startsWith('idle-tax: completion signal') ||
+    reason.startsWith('signal-complete:')
+  )
+}
+
 function isReadyToMergeSignoff(content: string): boolean {
   if (!content) return false
   // Allow on its own line — split & check each line's edges, plus first/last line of message.
@@ -1013,6 +1034,61 @@ function shortHash(s: string): string {
  * The caller (disbandTeam) wraps this in try/catch — extraction failures
  * never break the disband path.
  */
+/**
+ * W2.5f: aggregate per-team metrics from the feed's structured `meta.event`
+ * markers. Used to post a one-line "collab impact" summary at disband so
+ * the operator sees what the team did beyond the obvious code work — without
+ * having to run team-stats.sh manually. Returns empty string when there
+ * are no events worth summarizing.
+ */
+export function buildTeamImpactSummary(messages: EnsembleMessage[]): string {
+  let assumeOk = 0, assumeRej = 0, assumeFlag = 0
+  let confab = 0
+  let qAsked = 0, qAnswered = 0, qTimeout = 0
+  let runnerPass = 0, runnerFail = 0
+  let autoFixExhausted = 0
+  let unknownResolved = 0
+
+  for (const m of messages) {
+    const meta = (m.meta || {}) as Record<string, unknown>
+    const e = meta.event as string | undefined
+    if (!e) continue
+    switch (e) {
+      case 'assumption_verified':
+        if (meta.passed === true) assumeOk++
+        else assumeRej++
+        break
+      case 'assumption_flagged': assumeFlag++; break
+      case 'confabulation': confab++; break
+      case 'question_pending': qAsked++; break
+      case 'question_answered': qAnswered++; break
+      case 'question_timeout': qTimeout++; break
+      case 'unknown_resolved': unknownResolved++; break
+      case 'verify_runner': {
+        const passed = (meta.passed as number | undefined) ?? 0
+        const failed = (meta.failed as number | undefined) ?? 0
+        const errored = (meta.errored as number | undefined) ?? 0
+        if (failed === 0 && errored === 0 && passed > 0) runnerPass++
+        else if (failed > 0 || errored > 0) runnerFail++
+        break
+      }
+      case 'auto_fix_exhausted': autoFixExhausted++; break
+    }
+  }
+
+  const parts: string[] = []
+  if (assumeOk || assumeRej) parts.push(`assumptions ${assumeOk}🟢/${assumeRej}🔴`)
+  if (assumeFlag) parts.push(`${assumeFlag} flagged`)
+  if (confab) parts.push(`${confab} confab${confab === 1 ? '' : 's'} caught`)
+  if (qAsked) parts.push(`questions ${qAnswered}✅/${qTimeout}⏱`)
+  if (unknownResolved) parts.push(`${unknownResolved} [UNKNOWN] resolved`)
+  if (runnerPass || runnerFail) parts.push(`verify-runner ${runnerPass}✅/${runnerFail}❌`)
+  if (autoFixExhausted) parts.push(`auto-fix exhausted`)
+
+  if (parts.length === 0) return ''
+  return `📊 collab impact: ${parts.join(' · ')}`
+}
+
 function extractAndSaveLessons(
   teamId: string,
   team: { id: string; name: string; description?: string },
@@ -2244,22 +2320,45 @@ export async function disbandTeam(
     const worktreesDir = path.dirname(firstWorktree)
     const basePath = path.dirname(worktreesDir)
 
-    const conflictedAgents = new Set<string>()
-    for (const agent of agentsWithWorktrees) {
-      const worktreeInfo: WorktreeInfo = {
-        path: agent.worktreePath!,
-        branch: agent.worktreeBranch!,
-        agentName: agent.name,
-      }
-      const result = await mergeWorktree(worktreeInfo, basePath)
+    // W2.5f: only auto-merge when the team explicitly signaled completion.
+    // Otherwise preserve every worktree so the operator can review-and-merge
+    // manually instead of getting WIP fast-forwarded into master.
+    const completionConfirmed = isDisbandCompletionConfirmed(reason)
 
-      if (!result.success) conflictedAgents.add(agent.name)
+    const conflictedAgents = new Set<string>()
+    if (completionConfirmed) {
+      for (const agent of agentsWithWorktrees) {
+        const worktreeInfo: WorktreeInfo = {
+          path: agent.worktreePath!,
+          branch: agent.worktreeBranch!,
+          agentName: agent.name,
+        }
+        const result = await mergeWorktree(worktreeInfo, basePath)
+
+        if (!result.success) conflictedAgents.add(agent.name)
+        appendMessage(teamId, {
+          id: uuidv4(), teamId, from: 'ensemble', to: 'team',
+          content: result.success
+            ? `🌳 Merged ${agent.name}'s worktree (${agent.worktreeBranch})`
+            : `⚠️ Merge conflict for ${agent.name}: ${result.conflicts?.join(', ')}. Branch ${agent.worktreeBranch} preserved.`,
+          type: 'chat', timestamp: new Date().toISOString(),
+        })
+      }
+    } else {
+      // Skip merge — operator review required. Mark every agent with a worktree
+      // as "preserved-for-review" so we don't destroy them in the loop below.
+      // The recovery alert at the end of this block lists all of them with
+      // copy-paste merge commands.
+      for (const agent of agentsWithWorktrees) {
+        conflictedAgents.add(agent.name)
+      }
       appendMessage(teamId, {
         id: uuidv4(), teamId, from: 'ensemble', to: 'team',
-        content: result.success
-          ? `🌳 Merged ${agent.name}'s worktree (${agent.worktreeBranch})`
-          : `⚠️ Merge conflict for ${agent.name}: ${result.conflicts?.join(', ')}. Branch ${agent.worktreeBranch} preserved.`,
+        content:
+          `🛑 Auto-merge SKIPPED — disband reason "${reason.split(':')[0]}" is not an explicit completion signal. ` +
+          `${agentsWithWorktrees.length} worktree${agentsWithWorktrees.length === 1 ? '' : 's'} preserved for manual review.`,
         type: 'chat', timestamp: new Date().toISOString(),
+        meta: { event: 'auto_merge_skipped', reason, agentCount: agentsWithWorktrees.length },
       })
     }
 
@@ -2326,10 +2425,11 @@ export async function disbandTeam(
       })
     }
 
-    // FIX 1: surface merge conflicts as a single structured alert. Without
-    // this the operator only sees individual per-agent warnings buried in
-    // the team feed and can miss preserved branches. We post a recovery
-    // checklist + (if Telegram is configured) a push notification.
+    // FIX 1: surface merge conflicts (or W2.5f review-required preservations)
+    // as a single structured alert. Without this the operator only sees
+    // individual per-agent warnings buried in the team feed and can miss
+    // preserved branches. We post a recovery checklist + (if Telegram is
+    // configured) a push notification.
     if (conflictedAgents.size > 0) {
       const conflicted = team.agents.filter(a => conflictedAgents.has(a.name))
       const recoveryLines = conflicted.map(a => {
@@ -2339,13 +2439,22 @@ export async function disbandTeam(
                `      git merge --no-ff ${branch}     # resolve manually OR\n` +
                `      git cherry-pick <commit>          # pick specific changes`
       }).join('\n')
-      const summary = [
-        `🚧 ${conflictedAgents.size} merge conflict${conflictedAgents.size === 1 ? '' : 's'} — manual resolution needed:`,
-        recoveryLines,
-        ``,
-        `All other agent worktrees merged cleanly. Branches above are preserved (NOT data loss).`,
-        `Once resolved + merged, delete with: \`git branch -D <branch>\``,
-      ].join('\n')
+      // Header / footer phrasing depends on WHY merge was skipped:
+      const header = completionConfirmed
+        ? `🚧 ${conflictedAgents.size} merge conflict${conflictedAgents.size === 1 ? '' : 's'} — manual resolution needed:`
+        : `📋 ${conflictedAgents.size} branch${conflictedAgents.size === 1 ? '' : 'es'} preserved for manual review (no auto-merge — disband reason: "${reason.split(':')[0]}"):`
+      const footer = completionConfirmed
+        ? [
+            ``,
+            `All other agent worktrees merged cleanly. Branches above are preserved (NOT data loss).`,
+            `Once resolved + merged, delete with: \`git branch -D <branch>\``,
+          ]
+        : [
+            ``,
+            `Team did NOT explicitly signal [READY-TO-MERGE]. Review each branch above and merge what you trust.`,
+            `Once merged (or discarded), delete with: \`git branch -D <branch>\` and \`git worktree remove <path>\`.`,
+          ]
+      const summary = [header, recoveryLines, ...footer].join('\n')
       appendMessage(teamId, {
         id: uuidv4(), teamId, from: 'ensemble', to: 'team',
         content: summary,
@@ -2410,6 +2519,23 @@ export async function disbandTeam(
       if (fs.existsSync(f)) fs.unlinkSync(f)
     }
   } catch { /* non-fatal cleanup */ }
+
+  // W2.5f: post a one-line "collab impact" summary so the operator sees the
+  // metrics without having to run team-stats.sh. Aggregates events emitted
+  // during the team's lifetime (assumptions, confabs, questions, verify-runner).
+  try {
+    const allMessages = getMessages(teamId)
+    const impact = buildTeamImpactSummary(allMessages)
+    if (impact) {
+      appendMessage(teamId, {
+        id: uuidv4(), teamId, from: 'ensemble', to: 'team',
+        content: impact, type: 'chat', timestamp: new Date().toISOString(),
+        meta: { event: 'collab_impact_summary' },
+      })
+    }
+  } catch (err) {
+    console.error(`[Ensemble] Impact summary failed for ${teamId}:`, err)
+  }
 
   // Auto-learning: scan the disbanded team's messages for structured lesson
   // patterns and persist them to the global memory store so future teams

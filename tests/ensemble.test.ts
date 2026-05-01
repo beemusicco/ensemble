@@ -1780,7 +1780,9 @@ describe('worktree isolation lifecycle', () => {
     }))
   })
 
-  it('kills the local session before merging and destroying its worktree', async () => {
+  it('kills the local session before merging and destroying its worktree (on confirmed completion reason)', async () => {
+    // W2.5f: merge is now gated on completion-confirmed reason. Pass an explicit
+    // ready-to-merge reason to exercise the merge+destroy path.
     const team = makeTeam({
       id: 'team-worktree-disband',
       name: 'team-worktree-disband',
@@ -1799,7 +1801,7 @@ describe('worktree isolation lifecycle', () => {
     })
     const { mod, mocks } = await setupWorktreeService(team)
 
-    await mod.disbandTeam(team.id)
+    await mod.disbandTeam(team.id, 'ready-to-merge: quorum 1/1 signaled + 6min team-idle')
 
     expect(mocks.mergeWorktree).toHaveBeenCalledWith({
       path: '/repo/.worktrees/team-worktree-disband-codex-1',
@@ -1813,6 +1815,76 @@ describe('worktree isolation lifecycle', () => {
     }, '/repo')
     expect(mocks.killLocalAgent.mock.invocationCallOrder[0]).toBeLessThan(mocks.mergeWorktree.mock.invocationCallOrder[0])
     expect(mocks.mergeWorktree.mock.invocationCallOrder[0]).toBeLessThan(mocks.destroyWorktree.mock.invocationCallOrder[0])
+  })
+
+  // W2.5f: when disband reason is NOT a completion signal, skip merge + preserve worktrees
+  it('SKIPS auto-merge when disband reason is not an explicit completion signal (manual/lifetime/watchdog)', async () => {
+    const team = makeTeam({
+      id: 'team-skip-merge',
+      name: 'team-skip-merge',
+      agents: [
+        {
+          agentId: 'agent-1',
+          name: 'codex-1',
+          program: 'codex',
+          role: 'lead',
+          hostId: 'local',
+          status: 'active',
+          worktreePath: '/repo/.worktrees/team-skip-merge-codex-1',
+          worktreeBranch: 'collab/team-skip-merge/codex-1',
+        },
+      ],
+    })
+    const { mod, mocks } = await setupWorktreeService(team)
+
+    // Default disband reason ('manual') is NOT in the confirmed-completion list
+    await mod.disbandTeam(team.id)
+
+    expect(mocks.mergeWorktree).not.toHaveBeenCalled()
+    expect(mocks.destroyWorktree).not.toHaveBeenCalled()
+  })
+
+  it('SKIPS merge for lifetime-cap, soft-cap, watchdog reasons (all unconfirmed)', async () => {
+    for (const reason of [
+      'lifetime-cap: team age 95min exceeded 90min cap',
+      'soft-cap: 65min age + 18min idle',
+      'watchdog: triangular-chatter',
+      'standing-by: agents declared "going silent"',
+    ]) {
+      const team = makeTeam({
+        id: `team-skip-${reason.replace(/\W/g, '_')}`.slice(0, 30),
+        name: `team-skip-merge-r`,
+        agents: [
+          {
+            agentId: 'agent-1', name: 'codex-1', program: 'codex', role: 'lead',
+            hostId: 'local', status: 'active',
+            worktreePath: '/repo/.worktrees/skip-codex-1',
+            worktreeBranch: 'collab/skip/codex-1',
+          },
+        ],
+      })
+      const { mod, mocks } = await setupWorktreeService(team)
+      await mod.disbandTeam(team.id, reason)
+      expect(mocks.mergeWorktree).not.toHaveBeenCalled()
+    }
+  }, 20_000)
+
+  it('DOES merge on idle-tax completion-signal reason', async () => {
+    const team = makeTeam({
+      id: 'team-idle-tax-merge',
+      name: 'team-idle-tax-merge',
+      agents: [
+        {
+          agentId: 'agent-1', name: 'codex-1', program: 'codex', role: 'lead',
+          hostId: 'local', status: 'active',
+          worktreePath: '/repo/.worktrees/team-idle-tax-merge-codex-1',
+          worktreeBranch: 'collab/team-idle-tax-merge/codex-1',
+        },
+      ],
+    })
+    const { mod, mocks } = await setupWorktreeService(team)
+    await mod.disbandTeam(team.id, 'idle-tax: completion signal + idle threshold')
+    expect(mocks.mergeWorktree).toHaveBeenCalled()
   })
 
   it('skips worktree merge for remote agents even if worktree metadata exists', async () => {
