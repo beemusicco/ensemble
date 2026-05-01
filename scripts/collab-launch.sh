@@ -33,8 +33,10 @@ TASK="${2:?Usage: collab-launch.sh <cwd> <task>}"
 detect_project_from_task() {
   local task_lower
   task_lower=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  # Each line: <regex-pattern>|<absolute-path>
-  # First match wins. Keep most-specific terms first.
+
+  # ── Tier 1: hardcoded keyword rules (Slovenian roots + product names + features) ──
+  # These cover product-specific vocab that wouldn't match the project's
+  # basename. First match wins; keep most-specific terms first.
   local rules=(
     'libro\.si|libro\b|accounting.helper|cost.allocat|alembic|postmark|invoice.intake|sepa.xml|minimax|gocardless|onedrive|sharepoint|cloud.intake|intake.račun|tenant_id|/libro|brainainstein.*libro|računovod|fakturir|tcg.invest|tate.trade|zvezdar|potcg|analitič|cost.allocation.suggester|monthly.close|bulk.approve|invoice.dispatch|file.hash.duplicate|graph.api.intake'
     "$HOME/projects/accounting-helper"
@@ -56,15 +58,78 @@ detect_project_from_task() {
     fi
     i=$((i+2))
   done
+
+  # ── Tier 2: generic basename match across known project parents ──
+  # If task description mentions a directory basename that exists under
+  # any of the known project roots, treat that as the target. This
+  # covers any new project the operator adds without code changes.
+  # Word-boundary match prevents partial collisions ("api" wouldn't
+  # match basename "api-server" without word boundaries).
+  local parents=(
+    "$HOME/projects"
+    "$HOME/.openclaw/workspace/skills"
+    "$HOME/.openclaw/workspace"
+  )
+  for parent in "${parents[@]}"; do
+    [ -d "$parent" ] || continue
+    for proj in "$parent"/*; do
+      [ -d "$proj" ] || continue
+      local bn
+      bn=$(basename "$proj" | tr '[:upper:]' '[:lower:]')
+      # Skip helpers / 1-2 char dirs
+      [ ${#bn} -lt 3 ] && continue
+      if echo "$task_lower" | grep -qE "(^|[^a-z0-9_-])${bn}([^a-z0-9_-]|$)"; then
+        printf '%s' "$proj"; return 0
+      fi
+    done
+  done
+
   return 1
 }
 
-if [ "$CWD" = "." ] || echo "$CWD" | grep -q "tools/ensemble\|/.openclaw/tools/"; then
-  if detected="$(detect_project_from_task "$TASK")"; then
-    if [ "$CWD" != "$detected" ]; then
-      echo "🎯 Smart-CWD: task references $(basename "$detected") — overriding CWD from '$CWD' to '$detected'" >&2
+# ── Trigger conditions for auto-correct ──
+# Run detection ALWAYS, but only override CWD when:
+#   • Detection found a hit AND
+#   • Current CWD is NOT already that project AND
+#   • Either: current CWD lacks a project signal (.git or package.json or
+#     pyproject.toml) — i.e., user is in a "non-project" location like
+#     ~/.openclaw/tools/ensemble or ~/Downloads
+#   • OR current CWD is a known tool dir (~/.openclaw/tools/*) — operator
+#     was patching tools, not the target project
+#
+# This way: running /collab from inside a real project dir (with .git)
+# trusts that dir; running from anywhere else with a clear task hint
+# routes to the right project.
+cwd_has_project_signal() {
+  local d="$1"
+  [ -d "$d/.git" ] && return 0
+  [ -f "$d/package.json" ] && return 0
+  [ -f "$d/pyproject.toml" ] && return 0
+  [ -f "$d/Cargo.toml" ] && return 0
+  [ -f "$d/go.mod" ] && return 0
+  return 1
+}
+
+if detected="$(detect_project_from_task "$TASK")"; then
+  # Resolve current CWD to compare absolute paths
+  cwd_abs="$(cd "$CWD" 2>/dev/null && pwd || echo "$CWD")"
+  if [ "$cwd_abs" != "$detected" ]; then
+    is_tool_dir=0
+    echo "$cwd_abs" | grep -q "/.openclaw/tools/\|tools/ensemble" && is_tool_dir=1
+    if [ "$is_tool_dir" = "1" ] || ! cwd_has_project_signal "$cwd_abs"; then
+      echo "🎯 Smart-CWD: task references $(basename "$detected") — overriding CWD from '$cwd_abs' to '$detected'" >&2
+      CWD="$detected"
+    elif [ "$cwd_abs" != "$detected" ]; then
+      # Project signal in current CWD but task references a different project.
+      # Don't override silently — warn the operator that they may be in the
+      # wrong dir, but trust their CWD (they might intentionally be running
+      # cross-project tooling).
+      echo "⚠️ Smart-CWD: task mentions $(basename "$detected") but CWD is '$cwd_abs' (has project signal). NOT overriding. Set ENSEMBLE_FORCE_DETECTED_CWD=1 to override." >&2
+      if [ "${ENSEMBLE_FORCE_DETECTED_CWD:-}" = "1" ]; then
+        echo "🎯 Smart-CWD: ENSEMBLE_FORCE_DETECTED_CWD=1 — overriding to '$detected'" >&2
+        CWD="$detected"
+      fi
     fi
-    CWD="$detected"
   fi
 fi
 # Resolve to absolute path
