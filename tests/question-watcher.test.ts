@@ -84,6 +84,42 @@ describe('question-watcher (W3)', () => {
     expect(result.resolved).toBe(false)
   })
 
+  // W2.5g regression — production case 684b61fb 2026-05-01
+  it('dedupes within a single scan when same [QUESTION:] appears in multiple agent messages', async () => {
+    const teamId = uuidv4()
+    // Same agent emits the same [QUESTION:] in 3 different messages (e.g. agent
+    // quotes their own pending question in a follow-up summary). Should ping ONCE.
+    for (let i = 0; i < 3; i++) {
+      appendMessage(teamId, {
+        id: `m${i}`, teamId, from: 'codex-1', to: 'team',
+        content: `pass ${i}: still waiting on [QUESTION: branch first?]`,
+        type: 'chat', timestamp: new Date(Date.now() + i * 1000).toISOString(),
+      })
+    }
+    const pinged = await watcher.scanAndDispatchQuestions(teamId)
+    expect(pinged).toBe(1)
+    expect(watcher._pendingCount()).toBe(1)
+  })
+
+  it('survives "restart" — hydrates pingedKeys from feed events on next scan', async () => {
+    const teamId = uuidv4()
+    appendMessage(teamId, {
+      id: 'm1', teamId, from: 'codex-1', to: 'team',
+      content: '[QUESTION: deploy target?]',
+      type: 'chat', timestamp: new Date().toISOString(),
+    })
+    expect(await watcher.scanAndDispatchQuestions(teamId)).toBe(1)
+
+    // Simulate server restart — process-local pingedKeys is wiped
+    watcher._resetQuestionWatcher()
+
+    // Re-scan the SAME feed. Without hydration this would re-ping (the bug).
+    // With hydration, the existing question_pending event in the feed
+    // populates pingedKeys before extraction.
+    const re = await watcher.scanAndDispatchQuestions(teamId)
+    expect(re).toBe(0)
+  })
+
   it('ignores [QUESTION] inside ensemble or operator messages', async () => {
     const teamId = uuidv4()
     appendMessage(teamId, {

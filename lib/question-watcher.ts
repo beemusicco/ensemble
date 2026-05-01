@@ -50,8 +50,34 @@ function shortQuestionId(): string {
   return uuidv4().replace(/-/g, '').slice(0, 6)
 }
 
+/**
+ * W2.5g: hydrate pingedKeys from existing `question_pending` events in the
+ * team feed. Process-local Set is wiped on every server restart, which
+ * caused massive Telegram spam (production case 684b61fb, 2026-05-01: 7
+ * unique questions → 40 Telegram messages because each restart re-scanned
+ * the whole feed and re-pinged everything). The feed itself is the durable
+ * source of truth — every question we've ever pinged left a `question_pending`
+ * event there, so deriving the cache from feed makes restart idempotent.
+ */
+function hydrateCacheFromFeed(messages: EnsembleMessage[]): void {
+  for (const m of messages) {
+    const meta = (m.meta || {}) as Record<string, unknown>
+    if (meta.event !== 'question_pending') continue
+    const agent = meta.agent as string | undefined
+    const claim = meta.claim as string | undefined
+    if (!agent || !claim) continue
+    pingedKeys.add(`${m.teamId}::${normalizeClaim(claim)}::${agent}`)
+  }
+}
+
 function extractQuestions(messages: EnsembleMessage[]): Array<{ agent: string; claim: string; cacheKey: string; teamId: string }> {
   const found: Array<{ agent: string; claim: string; cacheKey: string; teamId: string }> = []
+  // W2.5g: also dedupe WITHIN this scan — if the same agent emits the same
+  // [QUESTION:] tag in multiple messages (or the same message references it
+  // multiple times), only the first occurrence counts. Without this, the
+  // global pingedKeys check happens BEFORE the loop adds new entries, so
+  // multiple messages with identical tags all flow through.
+  const seenInScan = new Set<string>()
   for (const m of messages) {
     if (!m.from || m.from === 'ensemble' || m.from === 'system' || m.from === 'operator') continue
     if (!m.content) continue
@@ -61,6 +87,8 @@ function extractQuestions(messages: EnsembleMessage[]): Array<{ agent: string; c
       if (!claim) continue
       const cacheKey = `${m.teamId}::${normalizeClaim(claim)}::${m.from}`
       if (pingedKeys.has(cacheKey)) continue
+      if (seenInScan.has(cacheKey)) continue
+      seenInScan.add(cacheKey)
       found.push({ agent: m.from, claim, cacheKey, teamId: m.teamId })
     }
   }
@@ -76,6 +104,10 @@ export async function scanAndDispatchQuestions(
   sinceTimestamp?: string,
 ): Promise<number> {
   const messages = getMessages(teamId, sinceTimestamp)
+  // W2.5g: hydrate pingedKeys from existing question_pending events in the
+  // feed BEFORE extracting new questions. This survives server restart so
+  // the same agent message doesn't re-ping every restart.
+  hydrateCacheFromFeed(messages)
   const questions = extractQuestions(messages)
   let pinged = 0
 
