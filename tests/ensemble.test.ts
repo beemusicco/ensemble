@@ -609,6 +609,103 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     expect(appendedMessages.some(m => /ready-to-merge/i.test(m.content))).toBe(false)
   })
 
+  // W2.5e regression: false-positive on prose mention
+  it('does NOT auto-disband when [READY-TO-MERGE] appears embedded in prose, not as sign-off', async () => {
+    // Production case (collab 25f8bf58, 2026-05-01): haiku-3 wrote
+    // "All tests pass + [VERIFY_DONE] gates → [READY-TO-MERGE]\n[PLAN_READY]"
+    // inside their PLAN message describing the protocol. Old loose regex
+    // matched mid-prose, team disbanded after 6 min with deliverables half-built.
+    const createdTs = new Date(Date.now() - 30 * 60 * 1000).toISOString()
+    const team = makeTeam({ createdAt: createdTs })
+    const idleTs = new Date(Date.now() - 7 * 60 * 1000).toISOString()
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1',
+        content: 'WORKER PLAN — Phase 3:\n6. All tests pass + [VERIFY_DONE] gates → [READY-TO-MERGE]\n\n[PLAN_READY]',
+        timestamp: idleTs }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1',
+        content: 'agreed plan', timestamp: idleTs }),
+    ]
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+    expect(appendedMessages.some(m => /ready-to-merge/i.test(m.content))).toBe(false)
+  })
+
+  // W2.5e regression: idle metric uses last-team-activity, not since-ready
+  it('does NOT disband on [READY-TO-MERGE] when team kept messaging after signal', async () => {
+    const createdTs = new Date(Date.now() - 30 * 60 * 1000).toISOString()
+    const team = makeTeam({ createdAt: createdTs })
+    const readyTs = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+    const recentTs = new Date(Date.now() - 1 * 60 * 1000).toISOString()  // 1min ago — fresh activity
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[READY-TO-MERGE]', timestamp: readyTs }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'wait — still patching B6', timestamp: recentTs }),
+    ]
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+    expect(appendedMessages.some(m => /ready-to-merge/i.test(m.content))).toBe(false)
+  })
+
+  // W2.5e regression: minimum age — suppress disband in first 10 min of team life
+  it('does NOT disband on [READY-TO-MERGE] in the first 10 min of team life (premature)', async () => {
+    const createdTs = new Date(Date.now() - 6 * 60 * 1000).toISOString()  // 6 min old
+    const team = makeTeam({ createdAt: createdTs })
+    const readyTs = new Date(Date.now() - 6 * 60 * 1000).toISOString()  // emitted at start
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[READY-TO-MERGE]', timestamp: readyTs }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'agreed', timestamp: readyTs }),
+    ]
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+    expect(appendedMessages.some(m => /ready-to-merge/i.test(m.content))).toBe(false)
+  })
+
+  // W2.5e regression: solo emission needs longer quiet (30 min) when not quorum
+  it('does NOT disband on solo [READY-TO-MERGE] when quiet < 30 min (no quorum)', async () => {
+    const createdTs = new Date(Date.now() - 40 * 60 * 1000).toISOString()
+    // 4-agent team — 1 emitter is NOT quorum (need 2 for >=50%)
+    const team: EnsembleTeam = {
+      id: 'team-1', name: 'team-1', description: '4-agent test', status: 'active',
+      agents: [
+        { agentId: 'a1', name: 'codex-1', program: 'codex', role: 'lead',  hostId: 'local', status: 'active' },
+        { agentId: 'a2', name: 'claude-2', program: 'claude', role: 'member', hostId: 'local', status: 'active' },
+        { agentId: 'a3', name: 'sonnet-3', program: 'sonnet', role: 'member', hostId: 'local', status: 'active' },
+        { agentId: 'a4', name: 'haiku-4',  program: 'haiku',  role: 'member', hostId: 'local', status: 'active' },
+      ],
+      createdBy: 'test', createdAt: createdTs, feedMode: 'live',
+    }
+    const idleTs = new Date(Date.now() - 10 * 60 * 1000).toISOString()  // 10 min idle, under 30
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[READY-TO-MERGE]', timestamp: idleTs }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'still verifying', timestamp: idleTs }),
+    ]
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+    expect(appendedMessages.some(m => /ready-to-merge/i.test(m.content))).toBe(false)
+  })
+
+  it('DOES disband on solo [READY-TO-MERGE] when quiet > 30 min (no quorum, but long silence)', async () => {
+    const createdTs = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+    const team: EnsembleTeam = {
+      id: 'team-1', name: 'team-1', description: '4-agent test', status: 'active',
+      agents: [
+        { agentId: 'a1', name: 'codex-1', program: 'codex', role: 'lead',  hostId: 'local', status: 'active' },
+        { agentId: 'a2', name: 'claude-2', program: 'claude', role: 'member', hostId: 'local', status: 'active' },
+        { agentId: 'a3', name: 'sonnet-3', program: 'sonnet', role: 'member', hostId: 'local', status: 'active' },
+        { agentId: 'a4', name: 'haiku-4',  program: 'haiku',  role: 'member', hostId: 'local', status: 'active' },
+      ],
+      createdBy: 'test', createdAt: createdTs, feedMode: 'live',
+    }
+    const idleTs = new Date(Date.now() - 32 * 60 * 1000).toISOString()  // 32 min idle, past solo threshold
+    const messages: EnsembleMessage[] = [
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: '[READY-TO-MERGE]', timestamp: idleTs }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'roger', timestamp: idleTs }),
+    ]
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+    expect(appendedMessages.some(m => /ready-to-merge/i.test(m.content))).toBe(true)
+    expect(appendedMessages.some(m => /solo/i.test(m.content))).toBe(true)
+  })
+
   // W2.5d Fix B: soft lifetime cap (60 min age + 15 min idle)
   it('disbands via soft-cap when team is 60+ min old AND idle 15+ min', async () => {
     const createdTs = new Date(Date.now() - 65 * 60 * 1000).toISOString()  // 65 min old

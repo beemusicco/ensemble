@@ -105,11 +105,34 @@ const STANDING_BY_IDLE_MS = parseEnvMs('ENSEMBLE_STANDING_BY_IDLE_MS', 10 * 60 *
 // instruct this pattern. The team correctly goes silent, but watchdog
 // can't distinguish "idle CLI prompt" from "long-running command in flight"
 // (both show non-shell foreground), so it defers all-stalled disband and
-// the team sits zombie until lifetime cap (90 min). 5-min silence after
-// the signal is enough buffer for last-minute objections.
-const READY_TO_MERGE_RE = /\[READY[-_ ]TO[-_ ]MERGE\]/i
+// the team sits zombie until lifetime cap (90 min).
+//
+// W2.5e production-finding tightening (collab 25f8bf58, 2026-05-01):
+//   1. Marker must be at message EDGE (start or end), not embedded in prose.
+//      haiku-3 wrote "gates → [READY-TO-MERGE]\n[PLAN_READY]" inside a PLAN
+//      describing the protocol — got mistaken for completion sign-off,
+//      team disbanded after 6 min with deliverables half-built.
+//      Same pattern as HIGH_CONFIDENCE_AT_START/AT_END for [DONE]/[VERIFY_DONE].
+//   2. Idle is "since last team activity" not "since ready signal" — if
+//      team kept messaging after signal, they're not actually done.
+//   3. Quorum: solo emission requires LONGER silence (likely false alarm or
+//      premature ack); >=50% emissions can disband on standard quiet.
+const READY_AT_START_RE = /^\s*\[READY[-_ ]TO[-_ ]MERGE\]/i
+const READY_AT_END_RE = /\[READY[-_ ]TO[-_ ]MERGE\]\s*[.!,:]?\s*$/i
 const READY_LOCAL_NO_GO_RE = /\bNO[-_ ]GO\b|\bNOT[-_ ]APPROVED\b/i
 const READY_TO_MERGE_QUIET_MS = parseEnvMs('ENSEMBLE_READY_QUIET_MS', 5 * 60 * 1000)
+const READY_TO_MERGE_SOLO_QUIET_MS = parseEnvMs('ENSEMBLE_READY_SOLO_QUIET_MS', 30 * 60 * 1000)
+const READY_TO_MERGE_MIN_AGE_MS = parseEnvMs('ENSEMBLE_READY_MIN_AGE_MS', 10 * 60 * 1000)
+
+function isReadyToMergeSignoff(content: string): boolean {
+  if (!content) return false
+  // Allow on its own line — split & check each line's edges, plus first/last line of message.
+  if (READY_AT_START_RE.test(content) || READY_AT_END_RE.test(content)) return true
+  for (const line of content.split('\n')) {
+    if (READY_AT_START_RE.test(line) && READY_AT_END_RE.test(line)) return true
+  }
+  return false
+}
 
 // W2.5d (Fix B): soft lifetime cap. The hard 90-min cap protects against
 // runaway zombie teams, but real collabs that hit 60 min idle for 15+ min
@@ -324,27 +347,45 @@ class EnsembleService {
     const lastTs = lastAgentMsg.timestamp ? new Date(lastAgentMsg.timestamp).getTime() : 0
     const idleMs = lastTs ? now - lastTs : 0
 
-    // W2.5d Fix A: [READY-TO-MERGE] from any agent + 5min quiet → disband.
-    // Premium-quad / ultrareview templates instruct agents to emit this and
-    // wait for human merge. Team correctly goes silent; watchdog defers
-    // because foreground != shell. Without this path, team sits zombie
-    // until the 90-min hard cap.
-    const lastReadyMsg = [...agentMsgs].reverse().find(m => READY_TO_MERGE_RE.test(m.content || ''))
-    if (lastReadyMsg) {
-      const readyTs = lastReadyMsg.timestamp ? new Date(lastReadyMsg.timestamp).getTime() : 0
-      // Honor any post-ready dissent (NO-GO / NOT APPROVED) — someone
-      // disagreed AFTER the merge signal, don't auto-disband on stale ready.
-      const dissent = agentMsgs.find(m => {
-        const ts = m.timestamp ? new Date(m.timestamp).getTime() : 0
-        return ts > readyTs && READY_LOCAL_NO_GO_RE.test(m.content || '')
-      })
-      if (!dissent) {
-        const idleSinceReady = readyTs ? now - readyTs : 0
-        if (idleSinceReady > READY_TO_MERGE_QUIET_MS) {
-          return {
-            reason: `ready-to-merge: ${lastReadyMsg.from} signaled + ${Math.round(idleSinceReady / 60_000)}min quiet`,
-            ageMs,
-            idleMs: idleSinceReady,
+    // W2.5d/W2.5e: [READY-TO-MERGE] sign-off + team-silent → disband.
+    // Tightened after collab 25f8bf58 false-positive (2026-05-01):
+    //   - Marker must be at message edge, not embedded in prose
+    //   - Use idle-since-last-team-activity, not wall-clock-since-signal
+    //   - Single-agent emission needs LONGER quiet (premature/accidental
+    //     emissions are common); quorum >=50% on standard quiet
+    //   - Suppress in the first 10 min of team life — agents haven't had
+    //     time to deliver real work
+    if (ageMs >= READY_TO_MERGE_MIN_AGE_MS) {
+      // Find all distinct agents who emitted [READY-TO-MERGE] as a sign-off
+      // (edge-anchored), and the latest such message.
+      const readyEmitters = new Set<string>()
+      let lastReadyMsg: typeof agentMsgs[number] | undefined
+      for (const m of agentMsgs) {
+        if (isReadyToMergeSignoff(m.content || '')) {
+          readyEmitters.add(m.from)
+          lastReadyMsg = m
+        }
+      }
+      if (lastReadyMsg) {
+        const readyTs = lastReadyMsg.timestamp ? new Date(lastReadyMsg.timestamp).getTime() : 0
+        // Honor post-ready dissent — someone said NO-GO after merge signal.
+        const dissent = agentMsgs.find(m => {
+          const ts = m.timestamp ? new Date(m.timestamp).getTime() : 0
+          return ts > readyTs && READY_LOCAL_NO_GO_RE.test(m.content || '')
+        })
+        if (!dissent) {
+          // Quorum: how many ACTIVE agents are there, how many signaled?
+          const activeCount = team.agents.filter(a => a.status === 'active' || a.status === 'idle').length
+          const denom = activeCount > 0 ? activeCount : team.agents.length
+          const hasQuorum = denom > 0 && readyEmitters.size * 2 >= denom  // >=50%
+          const requiredQuietMs = hasQuorum ? READY_TO_MERGE_QUIET_MS : READY_TO_MERGE_SOLO_QUIET_MS
+          if (idleMs > requiredQuietMs) {
+            const tag = hasQuorum ? `quorum ${readyEmitters.size}/${denom}` : `solo ${readyEmitters.size}/${denom}`
+            return {
+              reason: `ready-to-merge: ${tag} signaled + ${Math.round(idleMs / 60_000)}min team-idle`,
+              ageMs,
+              idleMs,
+            }
           }
         }
       }
