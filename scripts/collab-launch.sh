@@ -16,16 +16,56 @@ TASK="${2:?Usage: collab-launch.sh <cwd> <task>}"
 
 # Smart CWD: if the task mentions a known project path, use that as CWD
 # so agents start in the right directory with correct sandbox access.
-if [ "$CWD" = "." ] || echo "$CWD" | grep -q "tools/ensemble"; then
-  for candidate in \
-    "$HOME/.openclaw/workspace/skills/crypto-trading-platform" \
-    "$HOME/projects/brainai-dashboard" \
-    "$HOME/.openclaw/workspace"; do
-    if echo "$TASK" | grep -qi "$(basename "$candidate")" && [ -d "$candidate" ]; then
-      CWD="$candidate"
-      break
+#
+# W2.5h: production observation 2026-05-01 — 4 sparring libro.si collabs
+# all spawned from `~/.openclaw/tools/ensemble/` cwd because operator was
+# patching ensemble at the time. workingDirectory got recorded as ensemble
+# itself → confab guard searched wrong tree (29 false positives), npm-test
+# ran ensemble's package.json (always failed), auto-merge was a no-op
+# (worktrees in ensemble dir, agents wrote directly to accounting-helper
+# master). Original Smart CWD detection only matched the candidate's
+# BASENAME against the task — "libro.si" doesn't contain "accounting-helper",
+# so detection missed.
+#
+# Expanded keyword aliases below cover Slovenian + product-name forms.
+# Detection happens when CWD is `.`, ensemble dir, or any tool dir under
+# ~/.openclaw/tools/.
+detect_project_from_task() {
+  local task_lower
+  task_lower=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  # Each line: <regex-pattern>|<absolute-path>
+  # First match wins. Keep most-specific terms first.
+  local rules=(
+    'libro\.si|libro\b|accounting.helper|cost.allocat|alembic|postmark|invoice.intake|sepa.xml|minimax|gocardless|onedrive|sharepoint|cloud.intake|intake.račun|tenant_id|/libro|brainainstein.*libro|računovod|fakturir|tcg.invest|tate.trade|zvezdar|potcg|analitič|cost.allocation.suggester|monthly.close|bulk.approve|invoice.dispatch|file.hash.duplicate|graph.api.intake'
+    "$HOME/projects/accounting-helper"
+    'crypto.trading|crypto.trade|paper.trader|backtest|crypto.strateg|alphas|edge.classifier|kill.list|paper_trades|hyperliquid|deribit|funding.rate|exchange.fee'
+    "$HOME/.openclaw/workspace/skills/crypto-trading-platform"
+    'brainai.dashboard|/dashboard|task.queue|agent.queue'
+    "$HOME/projects/brainai-dashboard"
+    'tcg.price.tracker|tcg.scrap|tcg.invest|pokemon.cards'
+    "$HOME/.openclaw/workspace/skills/tcg-price-tracker"
+    'cs2.bett|counter.strike.bett'
+    "$HOME/.openclaw/workspace/skills/cs2-betting"
+  )
+  local i=0
+  while [ $i -lt ${#rules[@]} ]; do
+    local pattern="${rules[$i]}"
+    local path="${rules[$((i+1))]}"
+    if echo "$task_lower" | grep -qE "$pattern" && [ -d "$path" ]; then
+      printf '%s' "$path"; return 0
     fi
+    i=$((i+2))
   done
+  return 1
+}
+
+if [ "$CWD" = "." ] || echo "$CWD" | grep -q "tools/ensemble\|/.openclaw/tools/"; then
+  if detected="$(detect_project_from_task "$TASK")"; then
+    if [ "$CWD" != "$detected" ]; then
+      echo "🎯 Smart-CWD: task references $(basename "$detected") — overriding CWD from '$CWD' to '$detected'" >&2
+    fi
+    CWD="$detected"
+  fi
 fi
 # Resolve to absolute path
 CWD="$(cd "$CWD" 2>/dev/null && pwd || echo "$CWD")"
@@ -202,7 +242,23 @@ staged_patterns = [
     r'\bplan\b', r'\barhitektur', r'\bdesign\b', r'\bstress.?test\b',
     r'\badversarial\b', r'\bimplement.*(?:and|in)\s+(?:test|review)\b',
 ]
-staged = any(re.search(p, desc) for p in staged_patterns)
+# W2.5i: multi-PR sequenced work doesn't fit single-stage workflow.
+# Production observation 2026-05-01: 4 sparring libro.si collabs all
+# tasked with 'PR1 + PR2 + PR3' delivered only PR1, then exhausted
+# auto-fix iterations on incomplete state because EXEC ran out at 300s
+# with PR2/PR3 untouched. Disable staged for these — let agents pace
+# themselves and the watchdog handle disband.
+multi_pr_patterns = [
+    r'\b(?:pr|PR)\s*\d+\s*\+\s*(?:pr|PR)\s*\d+',                    # PR1 + PR2
+    r'\b(?:pr|PR)\s*\d+\s*[,;]\s*(?:pr|PR)\s*\d+',                  # PR1, PR2
+    r'\b(?:pr|PR)\s*\d+\s+(?:and|in|i?n)\s+(?:pr|PR)\s*\d+',        # PR6 and PR7
+    r'\b\d+\s+sequenced\s+(?:pr|PR)',                                # 3 sequenced PRs
+    r'\b\d+\s+(?:pr|PR)-?j',                                          # 3 PR-ji (Slovenian)
+    r'\bsequenced\s+(?:pr|PR)-?j',                                   # sequenced PR-ji
+    r'\b(?:pr|PR)\s*\d+\s*→\s*(?:pr|PR)\s*\d+',                     # PR1 → PR2 chain
+]
+multi_pr = any(re.search(p, desc) for p in multi_pr_patterns)
+staged = any(re.search(p, desc) for p in staged_patterns) and not multi_pr
 payload = {
     'name': os.environ['TNAME'],
     'description': os.environ['TDESC'],

@@ -254,7 +254,24 @@ function detectInDir(absDir: string, prefix: string, checks: BulletproofCheck[])
       const pkg = JSON.parse(fs.readFileSync(path.join(absDir, 'package.json'), 'utf-8'))
       const testScript: string | undefined = pkg?.scripts?.test
       const hasTest = !!testScript && !/no test specified/i.test(String(testScript))
-      if (hasTest) {
+      // W2.5j: vitest supports `--changed HEAD` to scope to changed files only.
+      // Production observation 2026-05-01: full `npm test` (vitest) failed every
+      // verify-runner pass on accounting-helper because of pre-existing master
+      // test debt — same lesson as ruff. Detect vitest from script value or
+      // devDependencies and emit a diff-scoped command. Other test runners
+      // (jest, mocha) keep `npm test` since their --changed support varies.
+      const isVitest = !!testScript && /\bvitest\b/i.test(testScript)
+        || !!(pkg?.devDependencies?.vitest || pkg?.dependencies?.vitest)
+      if (hasTest && isVitest) {
+        // Pre-flight git check — if the diff is empty, vitest --changed is a
+        // fast no-op, but we wrap to ensure exit 0 in that case.
+        checks.push({
+          id: `vitest-changed${idSuffix}`,
+          type: 'cmd',
+          cmd: `${cdPrefix}npx vitest run --changed HEAD --reporter=basic 2>&1 | tail -50; exit \${PIPESTATUS[0]}`,
+          timeoutMs: 240_000,
+        })
+      } else if (hasTest) {
         checks.push({
           id: `npm-test${idSuffix}`,
           type: 'cmd',

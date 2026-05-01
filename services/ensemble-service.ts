@@ -1010,7 +1010,7 @@ const GOTCHA_MARKER_RE = /\b(GOTCHA|LESSON|WARNING|REMEMBER|NOTE TO FUTURE|FUTUR
 // We only treat it as a lesson if the counter cites concrete file:line
 // or command-output evidence — opinion-only counters are noise.
 const SPARRING_COUNTER_RE = /🔍\s+[\w@-]+[:\s][^\n]*?counter[:\s]+([^\n]{30,500})/i
-const FILE_LINE_RE = /[A-Za-z0-9_/.\-]+\.(ts|tsx|js|jsx|py|sh|md|json|sql|yaml|yml|css|scss|html|svelte|vue|go|rs|kt|java|cpp|h)\b/
+const FILE_LINE_RE = /[A-Za-z0-9_/.-]+\.(ts|tsx|js|jsx|py|sh|md|json|sql|yaml|yml|css|scss|html|svelte|vue|go|rs|kt|java|cpp|h)\b/
 
 function shortHash(s: string): string {
   // Stable short hash, no crypto dep — tied to content for dedupe key.
@@ -1131,7 +1131,7 @@ function extractAndSaveLessons(
       for (const raw of content.split('\n')) {
         const line = raw.trim()
         if (!line) continue
-        if (!/^[•*\-]\s+|^\d+[.)]\s+/.test(line)) continue
+        if (!/^[•*-]\s+|^\d+[.)]\s+/.test(line)) continue
         if (!/\b(blocker|missing|broken|failed|reject|incomplete|stale|wrong|breaks)\b/i.test(line)) continue
         add('verify_blocker', line, sender, ['verify_blocker'])
         if (lessons.length >= MAX_LESSONS) break
@@ -2000,8 +2000,34 @@ async function createEnsembleTeamInner(
         `Include [VERIFY_DONE] in your message when review is complete.`,
       ].join(' ')
 
+      // W2.5k: per-template timeout defaults. premium-quad and sparring tasks
+      // are typically more complex (4 agents, adversarial heat) — claude-1
+      // (lead) frequently times out PLAN at 120s on real tasks. Caller can
+      // still override via request.stagedConfig.
+      const templateTimeouts: Record<string, { planTimeoutMs?: number; execTimeoutMs?: number; verifyTimeoutMs?: number }> = {
+        'premium-quad':    { planTimeoutMs: 300_000, execTimeoutMs: 1_200_000, verifyTimeoutMs: 300_000 },  // 5min/20min/5min
+        'ultrareview':     { planTimeoutMs: 240_000, execTimeoutMs: 600_000,  verifyTimeoutMs: 240_000 },  // 4min/10min/4min
+        'pentest':         { planTimeoutMs: 240_000, execTimeoutMs: 900_000,  verifyTimeoutMs: 240_000 },  // 4min/15min/4min
+        'crypto-strategy': { planTimeoutMs: 300_000, execTimeoutMs: 600_000,  verifyTimeoutMs: 240_000 },  // 5min/10min/4min
+        'adversarial':     { planTimeoutMs: 240_000, execTimeoutMs: 600_000,  verifyTimeoutMs: 240_000 },  // 4min/10min/4min
+        'audit-only':      { planTimeoutMs: 180_000, execTimeoutMs: 600_000,  verifyTimeoutMs: 180_000 },  // 3min/10min/3min
+      }
+      const challengeTimeouts: Record<string, { planTimeoutMs?: number; execTimeoutMs?: number; verifyTimeoutMs?: number }> = {
+        // Sparring is high-heat — agents debate longer. Bump even when no specific template.
+        'sparring': { planTimeoutMs: 240_000, execTimeoutMs: 600_000, verifyTimeoutMs: 240_000 },
+        'rigorous': { planTimeoutMs: 180_000, execTimeoutMs: 480_000, verifyTimeoutMs: 180_000 },
+      }
+      const templateDefault = (request.templateName && templateTimeouts[request.templateName]) || {}
+      const challengeDefault = (request.challengeMode && challengeTimeouts[request.challengeMode]) || {}
+      // Merge order: caller's stagedConfig wins, then template, then challenge.
+      const stagedConfigEffective: typeof request.stagedConfig = {
+        ...challengeDefault,
+        ...templateDefault,
+        ...(request.stagedConfig ?? {}),
+      }
+
       // Run in background so createEnsembleTeam returns immediately
-      runStagedWorkflow(team, request.stagedConfig, {
+      runStagedWorkflow(team, stagedConfigEffective, {
         buildPlanPrompt: ({ agent, teammates, index }) => buildStagedPlanPrompt(agent.name, teammates, index),
         buildExecPrompt: ({ teammates }) => buildStagedExecPrompt(teammates),
         buildVerifyPrompt: ({ teammateToReview }) => buildStagedVerifyPrompt(teammateToReview),

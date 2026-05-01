@@ -31,9 +31,10 @@ describe('bulletproof-config', () => {
     expect(cfg.always.find(c => c.id === 'pytest')?.cmd).toMatch(/pytest/)
   })
 
-  it('auto-detects npm test when package.json has a test script', () => {
+  it('auto-detects npm test when package.json has a test script (non-vitest)', () => {
+    // jest/mocha → fall back to npm test (W2.5j: vitest gets diff-scoped path)
     fs.writeFileSync(path.join(tmpDir, 'package.json'), JSON.stringify({
-      name: 'x', scripts: { test: 'vitest run' },
+      name: 'x', scripts: { test: 'jest' },
     }))
     const cfg = loadBulletproofConfig(tmpDir)
     expect(cfg.source).toBe('auto-detected')
@@ -75,7 +76,8 @@ describe('bulletproof-config', () => {
     }))
     const cfg = loadBulletproofConfig(tmpDir)
     expect(cfg.source).toBe('auto-detected')
-    expect(cfg.always.find(c => c.id === 'npm-test')).toBeDefined()
+    // vitest scripts route to vitest-changed (diff-scoped, W2.5j)
+    expect(cfg.always.find(c => c.id === 'vitest-changed')).toBeDefined()
   })
 
   it('selectChecks adds high_risk_extra when modified path matches a glob', () => {
@@ -119,14 +121,16 @@ describe('bulletproof-config', () => {
     expect(pytest!.cmd).toMatch(/not e2e and not slow/)
   })
 
-  it('detects npm test in subproject (frontend/) for monorepo layouts', () => {
+  it('detects vitest-changed in subproject (frontend/) for monorepo layouts (W2.5j)', () => {
     fs.mkdirSync(path.join(tmpDir, 'frontend'))
     fs.writeFileSync(path.join(tmpDir, 'frontend/package.json'), JSON.stringify({
       name: 'fe', scripts: { test: 'vitest run', lint: 'eslint .', typecheck: 'tsc --noEmit' },
     }))
     const cfg = loadBulletproofConfig(tmpDir)
     expect(cfg.source).toBe('auto-detected')
-    expect(cfg.always.find(c => c.id === 'npm-test-frontend')).toBeDefined()
+    // vitest in scripts → diff-scoped vitest-changed (not npm-test)
+    expect(cfg.always.find(c => c.id === 'vitest-changed-frontend')).toBeDefined()
+    expect(cfg.always.find(c => c.id === 'vitest-changed-frontend')?.cmd).toMatch(/vitest run --changed HEAD/)
     expect(cfg.always.find(c => c.id === 'lint-frontend')).toBeDefined()
     expect(cfg.always.find(c => c.id === 'typecheck-frontend')).toBeDefined()
   })
@@ -163,7 +167,7 @@ describe('bulletproof-config', () => {
     const ids = cfg.always.map(c => c.id)
     expect(ids).toContain('pytest-backend')
     expect(ids).toContain('ruff-diff-backend')
-    expect(ids).toContain('npm-test-frontend')
+    expect(ids).toContain('vitest-changed-frontend')  // W2.5j: diff-scoped
     expect(ids).toContain('lint-frontend')
   })
 
