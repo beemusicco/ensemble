@@ -30,13 +30,92 @@ TASK="${2:?Usage: collab-launch.sh <cwd> <task>}"
 # Expanded keyword aliases below cover Slovenian + product-name forms.
 # Detection happens when CWD is `.`, ensemble dir, or any tool dir under
 # ~/.openclaw/tools/.
+PROJECT_PARENTS=(
+  "$HOME/projects"
+  "$HOME/.openclaw/workspace/skills"
+  "$HOME/.openclaw/workspace"
+)
+
+# Read project-declared keywords from .collab-tools.md.
+# Supports two formats (operator picks):
+#   • HTML comment:   <!-- collab-keywords: kw1, kw2, kw3 -->
+#                     (invisible in rendered markdown — recommended)
+#   • Plain line:     keywords: kw1, kw2, kw3
+#                     (visible in doc, simpler to author)
+#
+# Resolution: operator-config dir wins over repo-root (matches W2.5b
+# project-config resolver).
+project_keywords() {
+  local proj="$1"
+  local basename
+  basename=$(basename "$proj" | tr '[:upper:]' '[:lower:]')
+  # Always include the basename itself
+  local result="$basename"
+
+  local f
+  for f in \
+    "$HOME/.openclaw/collab-config/$basename/.collab-tools.md" \
+    "$proj/.collab-tools.md"; do
+    [ -f "$f" ] || continue
+    # Match HTML comment OR plain line. Take everything between the
+    # marker and end-of-line (or -->), then split on commas.
+    local extracted
+    extracted=$(
+      {
+        grep -oE '<!--[[:space:]]*collab-keywords:[^>]*-->' "$f" 2>/dev/null \
+          | sed 's|<!--[[:space:]]*collab-keywords:[[:space:]]*||; s|[[:space:]]*-->||'
+        grep -iE '^[[:space:]]*(keywords|collab-keywords|aliases):' "$f" 2>/dev/null \
+          | sed 's/^[^:]*:[[:space:]]*//'
+      } | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$'
+    )
+    if [ -n "$extracted" ]; then
+      local pipe_kw
+      pipe_kw=$(echo "$extracted" | tr '\n' '|' | tr '[:upper:]' '[:lower:]')
+      result="${result}|${pipe_kw%|}"
+    fi
+    break  # first hit wins (operator-config priority)
+  done
+
+  printf '%s' "$result"
+}
+
+# Resolve $COLLAB_PROJECT (env override) to an absolute project path.
+# Accepts:
+#   • Absolute path that exists
+#   • Basename matching a directory under any parent in PROJECT_PARENTS
+resolve_collab_project_env() {
+  local arg="$1"
+  [ -z "$arg" ] && return 1
+  if [ -d "$arg" ]; then
+    printf '%s' "$(cd "$arg" && pwd)"; return 0
+  fi
+  local parent
+  for parent in "${PROJECT_PARENTS[@]}"; do
+    if [ -d "$parent/$arg" ]; then
+      printf '%s' "$parent/$arg"; return 0
+    fi
+  done
+  return 1
+}
+
 detect_project_from_task() {
   local task_lower
   task_lower=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
 
-  # ── Tier 1: hardcoded keyword rules (Slovenian roots + product names + features) ──
-  # These cover product-specific vocab that wouldn't match the project's
-  # basename. First match wins; keep most-specific terms first.
+  # ── Tier 0: COLLAB_PROJECT env override (highest priority) ──
+  if [ -n "${COLLAB_PROJECT:-}" ]; then
+    if resolved="$(resolve_collab_project_env "$COLLAB_PROJECT")"; then
+      printf '%s' "$resolved"; return 0
+    fi
+    echo "❌ COLLAB_PROJECT='$COLLAB_PROJECT' didn't resolve to a directory" >&2
+    return 1
+  fi
+
+  # ── Tier 1: hardcoded built-in rules (Slovenian roots + product features) ──
+  # Covers product-specific vocabulary that wouldn't appear in basename or
+  # auto-derived keywords. First match wins; keep most-specific terms first.
+  # This is the "shipping defaults" — for projects you control, prefer
+  # Tier 2 (.collab-tools.md keywords) over editing this list.
   local rules=(
     'libro\.si|libro\b|accounting.helper|cost.allocat|alembic|postmark|invoice.intake|sepa.xml|minimax|gocardless|onedrive|sharepoint|cloud.intake|intake.račun|tenant_id|/libro|brainainstein.*libro|računovod|fakturir|tcg.invest|tate.trade|zvezdar|potcg|analitič|cost.allocation.suggester|monthly.close|bulk.approve|invoice.dispatch|file.hash.duplicate|graph.api.intake'
     "$HOME/projects/accounting-helper"
@@ -59,26 +138,23 @@ detect_project_from_task() {
     i=$((i+2))
   done
 
-  # ── Tier 2: generic basename match across known project parents ──
-  # If task description mentions a directory basename that exists under
-  # any of the known project roots, treat that as the target. This
-  # covers any new project the operator adds without code changes.
-  # Word-boundary match prevents partial collisions ("api" wouldn't
-  # match basename "api-server" without word boundaries).
-  local parents=(
-    "$HOME/projects"
-    "$HOME/.openclaw/workspace/skills"
-    "$HOME/.openclaw/workspace"
-  )
-  for parent in "${parents[@]}"; do
+  # ── Tier 2: per-project declared keywords + basename match ──
+  # The bulletproof path for FUTURE projects: drop the project under any
+  # known parent (~/projects, ~/.openclaw/workspace/skills) and either:
+  #   (a) Add `<!-- collab-keywords: kw1, kw2 -->` to .collab-tools.md
+  #   (b) Skip declaration → falls back to basename-only match
+  # Word boundaries prevent partial-token collisions.
+  local parent
+  for parent in "${PROJECT_PARENTS[@]}"; do
     [ -d "$parent" ] || continue
     for proj in "$parent"/*; do
       [ -d "$proj" ] || continue
       local bn
       bn=$(basename "$proj" | tr '[:upper:]' '[:lower:]')
-      # Skip helpers / 1-2 char dirs
       [ ${#bn} -lt 3 ] && continue
-      if echo "$task_lower" | grep -qE "(^|[^a-z0-9_-])${bn}([^a-z0-9_-]|$)"; then
+      local kw
+      kw=$(project_keywords "$proj")
+      if echo "$task_lower" | grep -qE "(^|[^a-z0-9_/.-])(${kw})([^a-z0-9_/.-]|$)"; then
         printf '%s' "$proj"; return 0
       fi
     done
@@ -110,16 +186,16 @@ cwd_has_project_signal() {
   return 1
 }
 
+cwd_abs="$(cd "$CWD" 2>/dev/null && pwd || echo "$CWD")"
+is_tool_dir=0
+echo "$cwd_abs" | grep -q "/.openclaw/tools/\|tools/ensemble" && is_tool_dir=1
+
 if detected="$(detect_project_from_task "$TASK")"; then
-  # Resolve current CWD to compare absolute paths
-  cwd_abs="$(cd "$CWD" 2>/dev/null && pwd || echo "$CWD")"
   if [ "$cwd_abs" != "$detected" ]; then
-    is_tool_dir=0
-    echo "$cwd_abs" | grep -q "/.openclaw/tools/\|tools/ensemble" && is_tool_dir=1
     if [ "$is_tool_dir" = "1" ] || ! cwd_has_project_signal "$cwd_abs"; then
       echo "🎯 Smart-CWD: task references $(basename "$detected") — overriding CWD from '$cwd_abs' to '$detected'" >&2
       CWD="$detected"
-    elif [ "$cwd_abs" != "$detected" ]; then
+    else
       # Project signal in current CWD but task references a different project.
       # Don't override silently — warn the operator that they may be in the
       # wrong dir, but trust their CWD (they might intentionally be running
@@ -130,6 +206,27 @@ if detected="$(detect_project_from_task "$TASK")"; then
         CWD="$detected"
       fi
     fi
+  fi
+else
+  # No detection match. Fail loudly when CWD is a tool dir (operator was
+  # patching tools, not the target project) — silently using the tool dir
+  # as workingDirectory was the root cause of 4 misrouted libro.si collabs
+  # (2026-05-01 production observation).
+  if [ "$is_tool_dir" = "1" ] && [ -z "${ENSEMBLE_ALLOW_NO_DETECT:-}" ]; then
+    cat >&2 <<EOM
+❌ Could not determine target project from task description, and CWD is a
+   tool directory ('$cwd_abs'). Refusing to spawn — silently using a tool
+   dir as workingDirectory misroutes verify-runner, confab guard, and
+   auto-merge to the wrong repo.
+
+   Options to resolve:
+   • cd into the project directory before /collab
+   • COLLAB_PROJECT=<basename-or-path> /collab "<task>"
+   • Add to project's .collab-tools.md:
+       <!-- collab-keywords: keyword1, keyword2 -->
+   • ENSEMBLE_ALLOW_NO_DETECT=1 to bypass this check (not recommended)
+EOM
+    exit 2
   fi
 fi
 # Resolve to absolute path
