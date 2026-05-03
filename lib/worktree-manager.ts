@@ -127,11 +127,117 @@ export async function mergeWorktree(
 }
 
 /**
+ * W2.5m bulletproof primitive — per-worktree disposition evaluator.
+ *
+ * Replaces the W2.5f blanket "completion-confirmed → destroy ALL else
+ * preserve ALL" decision. The disband reason gates auto-merge only;
+ * destroy vs. preserve is decided per-worktree based on real-work signals.
+ *
+ * Production case (2026-05-03): 7 worktrees in crypto-trading-platform
+ * accumulated 122 GB because non-completion-confirmed disband preserved
+ * even fully-clean trees that had zero work. 5 of 7 had no commits and
+ * no uncommitted changes — they were dead weight.
+ *
+ * Same evaluator is used by:
+ *   - disbandTeam (per-agent decision after merge attempt)
+ *   - scripts/worktree-gc.sh (operator-driven sweep across all repos)
+ *
+ * Decisions (most-conservative wins):
+ *   1. PRESERVE-MERGE-CONFLICT — caller passed mergeFailed=true
+ *   2. PRESERVE-UNCOMMITTED    — `git status --porcelain` non-empty
+ *   3. PRESERVE-COMMITS        — HEAD has commits NOT in default branch
+ *   4. DESTROY                 — clean state + HEAD already in default branch
+ *
+ * Default branch resolution: try `main` (refs/heads/main) first, then
+ * `master`, fallback to whatever the parent repo says is HEAD.
+ */
+export type WorktreeDisposition =
+  | { action: 'destroy' }
+  | { action: 'preserve'; why: 'uncommitted' | 'commits-not-merged' | 'merge-conflict' | 'eval-error'; detail?: string }
+
+interface EvaluateInput {
+  worktreePath: string
+  basePath: string
+  mergeFailed?: boolean
+}
+
+async function resolveDefaultBranchRef(basePath: string): Promise<string | null> {
+  for (const ref of ['main', 'master']) {
+    try {
+      await execFileAsync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${ref}`], {
+        cwd: basePath,
+      })
+      return ref
+    } catch { /* try next */ }
+  }
+  // Fallback to whatever HEAD points at in the parent repo (rare).
+  try {
+    const { stdout } = await execFileAsync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: basePath })
+    return stdout.trim() || null
+  } catch {
+    return null
+  }
+}
+
+export async function evaluateWorktreeDisposition(input: EvaluateInput): Promise<WorktreeDisposition> {
+  const { worktreePath, basePath, mergeFailed } = input
+
+  // Tier 1: caller-supplied merge-conflict signal — preserve, decision done.
+  if (mergeFailed) {
+    return { action: 'preserve', why: 'merge-conflict' }
+  }
+
+  // Tier 2: uncommitted check.
+  let porcelain = ''
+  try {
+    const { stdout } = await execFileAsync('git', ['status', '--porcelain'], { cwd: worktreePath })
+    porcelain = stdout.trim()
+  } catch (err) {
+    // Can't even run git status — be conservative and preserve.
+    return { action: 'preserve', why: 'eval-error', detail: (err as Error).message?.slice(0, 200) }
+  }
+  if (porcelain) {
+    return { action: 'preserve', why: 'uncommitted', detail: porcelain.slice(0, 500) }
+  }
+
+  // Tier 3: commits-not-merged check (HEAD ancestor of default branch?)
+  const defaultRef = await resolveDefaultBranchRef(basePath)
+  if (!defaultRef) {
+    // Parent repo has no clear default branch — preserve to be safe.
+    return { action: 'preserve', why: 'eval-error', detail: 'no default branch in parent' }
+  }
+  let head = ''
+  try {
+    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: worktreePath })
+    head = stdout.trim()
+  } catch (err) {
+    return { action: 'preserve', why: 'eval-error', detail: 'cannot resolve HEAD' }
+  }
+  try {
+    // is-ancestor exits 0 if true, 1 if false, other if error
+    await execFileAsync('git', ['merge-base', '--is-ancestor', head, defaultRef], { cwd: basePath })
+    // Exit 0 → HEAD is ancestor → fully merged → safe to destroy.
+    return { action: 'destroy' }
+  } catch (err) {
+    const code = (err as { code?: number }).code
+    if (code === 1) {
+      // HEAD has commits not in default branch → preserve.
+      return { action: 'preserve', why: 'commits-not-merged' }
+    }
+    // Other error (rare — corrupted ref, etc.) → preserve conservatively.
+    return { action: 'preserve', why: 'eval-error', detail: (err as Error).message?.slice(0, 200) }
+  }
+}
+
+/**
  * Check whether a worktree has uncommitted work (modified, staged, or
  * untracked files). Used by the disband path to preserve worktrees agents
  * left in an in-flight state instead of silently nuking their changes.
  *
  * Returns the porcelain output trimmed (empty string = fully clean).
+ *
+ * Kept for back-compat with disbandTeam. New code should prefer
+ * evaluateWorktreeDisposition() which makes the full decision.
  */
 export async function uncommittedChanges(worktreePath: string): Promise<string> {
   try {

@@ -1546,7 +1546,7 @@ describe('buildPromptPreview() — injection guard + completion guidance', () =>
         { id: 't4', name: 'd', description: 'old4', status: 'failed',    agents: [], createdBy: 'x', createdAt: oldTs, completedAt: oldTs, feedMode: 'live' as const },
         { id: 't5', name: 'e', description: 'recent', status: 'disbanded', agents: [], createdBy: 'x', createdAt: recentTs, completedAt: recentTs, feedMode: 'live' as const },
         { id: 't6', name: 'f', description: 'active', status: 'active', agents: [], createdBy: 'x', createdAt: recentTs, feedMode: 'live' as const },
-      ] as any
+      ] satisfies EnsembleTeam[]
       saveTeams(teams)
       const live = loadTeams()
       // Active + recent disbanded must remain in live file
@@ -1660,12 +1660,19 @@ describe('worktree isolation lifecycle', () => {
       isRemoteSessionReady: vi.fn(async () => true),
       getAgentTokenUsage: vi.fn(async () => 'unknown'),
     }))
+    type Disp =
+      | { action: 'destroy' }
+      | { action: 'preserve'; why: 'uncommitted' | 'commits-not-merged' | 'merge-conflict' | 'eval-error'; detail?: string }
+    const evaluateWorktreeDisposition = vi.fn<() => Promise<Disp>>(async () => ({ action: 'destroy' }))
     vi.doMock('../lib/worktree-manager', () => ({
       createWorktree,
       mergeWorktree,
       destroyWorktree,
       listTeamWorktrees: vi.fn(async () => []),
-      uncommittedChanges: vi.fn(async () => ''),  // clean by default — destroy proceeds
+      uncommittedChanges: vi.fn(async () => ''),  // clean by default
+      // W2.5m: by default treat all mocked worktrees as clean+merged → destroy.
+      // Tests that need preserve behavior should override this mock.
+      evaluateWorktreeDisposition,
     }))
     vi.doMock('../lib/hosts-config', () => ({
       isSelf: vi.fn((hostId: string) => hostId === 'local'),
@@ -1714,6 +1721,7 @@ describe('worktree isolation lifecycle', () => {
         createWorktree,
         mergeWorktree,
         destroyWorktree,
+        evaluateWorktreeDisposition,
       },
     }
   }
@@ -1817,8 +1825,9 @@ describe('worktree isolation lifecycle', () => {
     expect(mocks.mergeWorktree.mock.invocationCallOrder[0]).toBeLessThan(mocks.destroyWorktree.mock.invocationCallOrder[0])
   })
 
-  // W2.5f: when disband reason is NOT a completion signal, skip merge + preserve worktrees
-  it('SKIPS auto-merge when disband reason is not an explicit completion signal (manual/lifetime/watchdog)', async () => {
+  // W2.5f + W2.5m: non-confirmed reason skips merge but STILL destroys clean worktrees
+  // (clean = no uncommitted, no commits-not-merged) per the disposition evaluator.
+  it('SKIPS auto-merge when disband reason is not completion signal but DESTROYS clean worktrees', async () => {
     const team = makeTeam({
       id: 'team-skip-merge',
       name: 'team-skip-merge',
@@ -1837,20 +1846,21 @@ describe('worktree isolation lifecycle', () => {
     })
     const { mod, mocks } = await setupWorktreeService(team)
 
-    // Default disband reason ('manual') is NOT in the confirmed-completion list
-    await mod.disbandTeam(team.id)
+    await mod.disbandTeam(team.id)  // 'manual' reason — not confirmed
 
     expect(mocks.mergeWorktree).not.toHaveBeenCalled()
-    expect(mocks.destroyWorktree).not.toHaveBeenCalled()
+    // W2.5m: clean worktree (mock evaluator returns destroy) → destroyed even on unconfirmed disband
+    expect(mocks.destroyWorktree).toHaveBeenCalled()
   })
 
-  it('SKIPS merge for lifetime-cap, soft-cap, watchdog reasons (all unconfirmed)', async () => {
+  it('SKIPS merge for lifetime-cap/soft-cap/watchdog reasons but destroys clean worktrees (W2.5m)', async () => {
     for (const reason of [
       'lifetime-cap: team age 95min exceeded 90min cap',
       'soft-cap: 65min age + 18min idle',
       'watchdog: triangular-chatter',
       'standing-by: agents declared "going silent"',
     ]) {
+      vi.resetModules()  // each iteration needs fresh mocks
       const team = makeTeam({
         id: `team-skip-${reason.replace(/\W/g, '_')}`.slice(0, 30),
         name: `team-skip-merge-r`,
@@ -1866,8 +1876,54 @@ describe('worktree isolation lifecycle', () => {
       const { mod, mocks } = await setupWorktreeService(team)
       await mod.disbandTeam(team.id, reason)
       expect(mocks.mergeWorktree).not.toHaveBeenCalled()
+      // Clean worktrees still cleaned up regardless of reason
+      expect(mocks.destroyWorktree).toHaveBeenCalled()
     }
-  }, 20_000)
+  }, 30_000)
+
+  // W2.5m: PRESERVES worktrees that have real work (uncommitted OR commits-not-merged)
+  it('PRESERVES worktrees with uncommitted changes regardless of disband reason', async () => {
+    const team = makeTeam({
+      id: 'team-uncommit',
+      name: 'team-uncommit',
+      agents: [
+        {
+          agentId: 'agent-1', name: 'codex-1', program: 'codex', role: 'lead',
+          hostId: 'local', status: 'active',
+          worktreePath: '/repo/.worktrees/team-uncommit-codex-1',
+          worktreeBranch: 'collab/team-uncommit/codex-1',
+        },
+      ],
+    })
+    const { mod, mocks } = await setupWorktreeService(team)
+    // Override evaluator: this worktree has uncommitted work
+    mocks.evaluateWorktreeDisposition.mockResolvedValue({
+      action: 'preserve', why: 'uncommitted', detail: ' M README.md',
+    })
+    await mod.disbandTeam(team.id, 'manual')
+    expect(mocks.destroyWorktree).not.toHaveBeenCalled()
+  })
+
+  it('PRESERVES worktrees with commits not in default branch', async () => {
+    const team = makeTeam({
+      id: 'team-commits',
+      name: 'team-commits',
+      agents: [
+        {
+          agentId: 'agent-1', name: 'codex-1', program: 'codex', role: 'lead',
+          hostId: 'local', status: 'active',
+          worktreePath: '/repo/.worktrees/team-commits-codex-1',
+          worktreeBranch: 'collab/team-commits/codex-1',
+        },
+      ],
+    })
+    const { mod, mocks } = await setupWorktreeService(team)
+    mocks.evaluateWorktreeDisposition.mockResolvedValue({
+      action: 'preserve', why: 'commits-not-merged',
+    })
+    await mod.disbandTeam(team.id, 'lifetime-cap: 95min')
+    expect(mocks.destroyWorktree).not.toHaveBeenCalled()
+  })
 
   it('DOES merge on idle-tax completion-signal reason', async () => {
     const team = makeTeam({

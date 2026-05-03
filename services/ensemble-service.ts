@@ -39,7 +39,7 @@ import { spawn, exec, execFile } from 'child_process'
 import { promisify } from 'util'
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
-import { createWorktree, mergeWorktree, destroyWorktree, uncommittedChanges, type WorktreeInfo } from '../lib/worktree-manager'
+import { createWorktree, mergeWorktree, destroyWorktree, uncommittedChanges, evaluateWorktreeDisposition, type WorktreeInfo, type WorktreeDisposition } from '../lib/worktree-manager'
 import { runStagedWorkflow } from '../lib/staged-workflow'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -2346,12 +2346,17 @@ export async function disbandTeam(
     const worktreesDir = path.dirname(firstWorktree)
     const basePath = path.dirname(worktreesDir)
 
-    // W2.5f: only auto-merge when the team explicitly signaled completion.
-    // Otherwise preserve every worktree so the operator can review-and-merge
-    // manually instead of getting WIP fast-forwarded into master.
+    // W2.5f: completion-confirmed reason gates AUTO-MERGE only.
+    // W2.5m: destroy vs preserve is decided per-worktree by the disposition
+    // evaluator (see evaluateWorktreeDisposition) — clean trees with no
+    // ahead-of-default-branch commits get destroyed regardless of disband
+    // reason. Pre-W2.5m, non-completion-confirmed reasons preserved EVERY
+    // worktree blindly, accumulating 122 GB of dead trees in production.
     const completionConfirmed = isDisbandCompletionConfirmed(reason)
 
-    const conflictedAgents = new Set<string>()
+    // First pass: try merge for completion-confirmed disbands. Track
+    // per-agent merge outcomes so the evaluator can mark them as conflict.
+    const mergeFailedFor = new Set<string>()
     if (completionConfirmed) {
       for (const agent of agentsWithWorktrees) {
         const worktreeInfo: WorktreeInfo = {
@@ -2360,8 +2365,7 @@ export async function disbandTeam(
           agentName: agent.name,
         }
         const result = await mergeWorktree(worktreeInfo, basePath)
-
-        if (!result.success) conflictedAgents.add(agent.name)
+        if (!result.success) mergeFailedFor.add(agent.name)
         appendMessage(teamId, {
           id: uuidv4(), teamId, from: 'ensemble', to: 'team',
           content: result.success
@@ -2371,47 +2375,56 @@ export async function disbandTeam(
         })
       }
     } else {
-      // Skip merge — operator review required. Mark every agent with a worktree
-      // as "preserved-for-review" so we don't destroy them in the loop below.
-      // The recovery alert at the end of this block lists all of them with
-      // copy-paste merge commands.
-      for (const agent of agentsWithWorktrees) {
-        conflictedAgents.add(agent.name)
-      }
       appendMessage(teamId, {
         id: uuidv4(), teamId, from: 'ensemble', to: 'team',
         content:
           `🛑 Auto-merge SKIPPED — disband reason "${reason.split(':')[0]}" is not an explicit completion signal. ` +
-          `${agentsWithWorktrees.length} worktree${agentsWithWorktrees.length === 1 ? '' : 's'} preserved for manual review.`,
+          `Worktrees with real work preserved; clean ones will be destroyed below.`,
         type: 'chat', timestamp: new Date().toISOString(),
         meta: { event: 'auto_merge_skipped', reason, agentCount: agentsWithWorktrees.length },
       })
     }
 
-    // Track agents whose worktrees are PRESERVED — either due to merge
-    // conflicts (existing path) or due to uncommitted local work (new
-    // path). Both cases need the operator's attention before we destroy.
-    const preservedForUncommitted = new Map<string, string>()  // agentName → porcelain output
+    // Second pass: per-worktree disposition evaluator decides destroy vs preserve.
+    // Evaluator considers: uncommitted state, commits-ahead-of-default-branch,
+    // merge-conflict signal from caller. Reason-agnostic.
+    const dispositions = new Map<string, WorktreeDisposition>()
+    const conflictedAgents = new Set<string>()  // kept for merge-conflict alert
+    const preservedForUncommitted = new Map<string, string>()  // agentName → porcelain
+    const preservedForCommits = new Set<string>()  // agentName → has commits-not-merged
+
     for (const agent of agentsWithWorktrees) {
-      if (conflictedAgents.has(agent.name)) {
-        console.warn(`[Ensemble] Skipping worktree destroy for ${agent.name} — merge had conflicts, branch preserved`)
-        continue
-      }
       const worktreeInfo: WorktreeInfo = {
         path: agent.worktreePath!,
         branch: agent.worktreeBranch!,
         agentName: agent.name,
       }
-      // Check for uncommitted state BEFORE destroy — agents sometimes leave
-      // local tweaks they intend to hand off ("standing-by-silently" pattern
-      // observed on 69db6548). We preserve those instead of silently nuking.
-      const uncommitted = await uncommittedChanges(worktreeInfo.path)
-      if (uncommitted) {
-        preservedForUncommitted.set(agent.name, uncommitted)
-        console.warn(`[Ensemble] Preserving worktree for ${agent.name} — uncommitted local changes detected`)
+      const disposition = await evaluateWorktreeDisposition({
+        worktreePath: worktreeInfo.path,
+        basePath,
+        mergeFailed: mergeFailedFor.has(agent.name),
+      })
+      dispositions.set(agent.name, disposition)
+
+      if (disposition.action === 'destroy') {
+        await destroyWorktree(worktreeInfo, basePath)
         continue
       }
-      await destroyWorktree(worktreeInfo, basePath)
+      // preserve — categorize for downstream alerting
+      if (disposition.why === 'merge-conflict') {
+        conflictedAgents.add(agent.name)
+        console.warn(`[Ensemble] Preserved (merge-conflict): ${agent.name}`)
+      } else if (disposition.why === 'uncommitted') {
+        preservedForUncommitted.set(agent.name, disposition.detail || '(porcelain detail unavailable)')
+        console.warn(`[Ensemble] Preserved (uncommitted): ${agent.name}`)
+      } else if (disposition.why === 'commits-not-merged') {
+        preservedForCommits.add(agent.name)
+        console.warn(`[Ensemble] Preserved (commits-not-merged): ${agent.name}`)
+      } else {
+        // eval-error — treat as conservative preserve
+        preservedForCommits.add(agent.name)
+        console.warn(`[Ensemble] Preserved (eval-error): ${agent.name} — ${disposition.detail || 'unknown'}`)
+      }
     }
 
     // Surface uncommitted-work preservation as a structured alert with
@@ -2456,28 +2469,34 @@ export async function disbandTeam(
     // individual per-agent warnings buried in the team feed and can miss
     // preserved branches. We post a recovery checklist + (if Telegram is
     // configured) a push notification.
-    if (conflictedAgents.size > 0) {
-      const conflicted = team.agents.filter(a => conflictedAgents.has(a.name))
-      const recoveryLines = conflicted.map(a => {
+    // W2.5m: combine merge-conflict + commits-not-merged into single alert.
+    // Both classes need operator review (preserved worktree with real branch
+    // commits). Distinguished by `why` so the alert can guide right action.
+    const reviewAgents = new Set<string>([...conflictedAgents, ...preservedForCommits])
+    if (reviewAgents.size > 0) {
+      const reviewList = team.agents.filter(a => reviewAgents.has(a.name))
+      const recoveryLines = reviewList.map(a => {
         const branch = a.worktreeBranch ?? 'unknown-branch'
-        return `  • ${a.name} → branch \`${branch}\`\n` +
+        const why = conflictedAgents.has(a.name) ? 'merge-conflict' : 'commits-not-merged'
+        return `  • ${a.name} → branch \`${branch}\` (${why})\n` +
                `      git diff master...${branch}\n` +
                `      git merge --no-ff ${branch}     # resolve manually OR\n` +
                `      git cherry-pick <commit>          # pick specific changes`
       }).join('\n')
       // Header / footer phrasing depends on WHY merge was skipped:
       const header = completionConfirmed
-        ? `🚧 ${conflictedAgents.size} merge conflict${conflictedAgents.size === 1 ? '' : 's'} — manual resolution needed:`
-        : `📋 ${conflictedAgents.size} branch${conflictedAgents.size === 1 ? '' : 'es'} preserved for manual review (no auto-merge — disband reason: "${reason.split(':')[0]}"):`
+        ? `🚧 ${reviewAgents.size} branch${reviewAgents.size === 1 ? '' : 'es'} need review — merge conflict OR commits-not-yet-merged:`
+        : `📋 ${reviewAgents.size} branch${reviewAgents.size === 1 ? '' : 'es'} preserved for manual review (no auto-merge — disband reason: "${reason.split(':')[0]}"):`
       const footer = completionConfirmed
         ? [
             ``,
-            `All other agent worktrees merged cleanly. Branches above are preserved (NOT data loss).`,
+            `Clean worktrees were destroyed automatically. Branches above have real commits — review and merge or discard.`,
             `Once resolved + merged, delete with: \`git branch -D <branch>\``,
           ]
         : [
             ``,
             `Team did NOT explicitly signal [READY-TO-MERGE]. Review each branch above and merge what you trust.`,
+            `Clean worktrees with no commits/uncommitted were destroyed automatically (W2.5m).`,
             `Once merged (or discarded), delete with: \`git branch -D <branch>\` and \`git worktree remove <path>\`.`,
           ]
       const summary = [header, recoveryLines, ...footer].join('\n')
@@ -2486,10 +2505,11 @@ export async function disbandTeam(
         content: summary,
         type: 'chat', timestamp: new Date().toISOString(),
         meta: {
-          event: 'merge_conflict_alert',
-          conflictCount: conflictedAgents.size,
+          event: 'worktree_review_alert',
+          reviewCount: reviewAgents.size,
           conflictedAgents: [...conflictedAgents],
-          branches: conflicted.map(a => a.worktreeBranch).filter(Boolean),
+          commitsNotMergedAgents: [...preservedForCommits],
+          branches: reviewList.map(a => a.worktreeBranch).filter(Boolean),
         },
       })
       // Telegram push if configured (uses existing TELEGRAM_BOT_TOKEN /
@@ -2498,10 +2518,10 @@ export async function disbandTeam(
         try {
           const taskShort = (team.description || '').split('\n')[0].slice(0, 80)
           const tgText = [
-            `🚧 *${conflictedAgents.size} merge conflict${conflictedAgents.size === 1 ? '' : 's'}* on team \`${team.id.slice(0, 8)}\``,
+            `🚧 *${reviewAgents.size} worktree${reviewAgents.size === 1 ? '' : 's'} need review* on team \`${team.id.slice(0, 8)}\``,
             `Task: ${taskShort}`,
             ``,
-            ...conflicted.map(a => `\`${a.worktreeBranch}\``),
+            ...reviewList.map(a => `\`${a.worktreeBranch}\``),
             ``,
             `Run \`git branch --list "collab/${team.id.slice(0, 8)}*"\` to see preserved branches.`,
           ].join('\n')
