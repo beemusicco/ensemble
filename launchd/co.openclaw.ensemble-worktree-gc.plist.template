@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Weekly worktree garbage collection — APPLY mode by default.
+  Walks ~/projects, ~/.openclaw/workspace, ~/.openclaw/tools, finds all
+  .worktrees/ dirs, applies the W2.5m disposition evaluator. Destroys
+  ONLY worktrees that are:
+    - Clean (no uncommitted changes per `git status --porcelain`)
+    - Already merged (HEAD is ancestor of default branch)
+
+  Worktrees with uncommitted changes, commits-not-merged, or any eval
+  error are PRESERVED — operator review required. So --apply is safe by
+  default; the per-worktree evaluator is the safety, not the dry-run.
+
+  To switch to dry-run-only mode (audit-only), remove the `--apply` arg
+  in ProgramArguments below. Output is logged to
+  ~/logs/ensemble-worktree-gc.log so the operator can audit afterwards.
+
+  Install:
+    sed "s|HOME_PLACEHOLDER|$HOME|g" launchd/co.openclaw.ensemble-worktree-gc.plist.template > ~/Library/LaunchAgents/co.openclaw.ensemble-worktree-gc.plist
+    launchctl load ~/Library/LaunchAgents/co.openclaw.ensemble-worktree-gc.plist
+
+  Schedule: every Sunday at 04:30 local time (after memory-consolidate at
+  04:00 — runs sequentially, low-traffic window, no overlap).
+
+  Why this exists: production accumulated 122 GB of dead worktrees before
+  W2.5m landed (commit 99032bc on 2026-05-03). Even with the disband-time
+  primitive in place, watchdog-killed teams or crashed disband paths can
+  leave orphans behind. Weekly GC ensures they don't compound.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>co.openclaw.ensemble-worktree-gc</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>HOME_PLACEHOLDER/.openclaw/tools/ensemble/scripts/worktree-gc.sh</string>
+        <string>--apply</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>HOME_PLACEHOLDER/.openclaw/tools/ensemble</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>HOME_PLACEHOLDER/logs/ensemble-worktree-gc.log</string>
+    <key>StandardErrorPath</key>
+    <string>HOME_PLACEHOLDER/logs/ensemble-worktree-gc.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>HOME_PLACEHOLDER</string>
+    </dict>
+</dict>
+</plist>
