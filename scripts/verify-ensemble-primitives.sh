@@ -109,6 +109,22 @@ check "fwd-bias:wired-in-disband" "grep -q 'resolveOverlapByForwardBias(' $ROOT/
 check "fwd-bias:operator-opt-out-env" "grep -q 'ENSEMBLE_AUTONOMOUS_MERGE' $ROOT/services/ensemble-service.ts"
 check "fwd-bias:tests-exist" "test -f $ROOT/tests/forward-bias-resolver.test.ts"
 
+# ── Primitive 9: alien-thinking template DEPLOYS INVENTION-PROTOCOL ──
+# Each role must reference INVENTION-PROTOCOL.md AND name specific tools
+# (Pre-mortem, Via Negativa, Ideal Final Result, etc.) — not just gesture.
+check "alien:references-protocol-file" "grep -q 'INVENTION-PROTOCOL.md' $ROOT/collab-templates.json"
+check "alien:diverger-deploys-reframe" "grep -q 'REFRAME the problem 5' $ROOT/collab-templates.json"
+check "alien:diverger-deploys-inversion" "grep -q 'INVERSION' $ROOT/collab-templates.json"
+check "alien:diverger-deploys-forcing-functions" "grep -q 'FORCING FUNCTIONS' $ROOT/collab-templates.json"
+check "alien:connector-deploys-ideal-final-result" "grep -q 'IDEAL FINAL RESULT' $ROOT/collab-templates.json"
+check "alien:connector-deploys-contradiction-resolution" "grep -q 'CONTRADICTION RESOLUTION' $ROOT/collab-templates.json"
+check "alien:converger-deploys-pre-mortem" "grep -q 'PRE-MORTEM' $ROOT/collab-templates.json"
+check "alien:converger-deploys-via-negativa" "grep -q 'VIA NEGATIVA' $ROOT/collab-templates.json"
+check "alien:converger-deploys-second-order" "grep -q 'SECOND-ORDER' $ROOT/collab-templates.json"
+check "alien:converger-deploys-10x-test" "grep -q '10X TEST' $ROOT/collab-templates.json"
+check "alien:keyword-invent" "grep -q 'invent' $ROOT/scripts/collab-launch.sh"
+check "alien:keyword-iznajdi" "grep -q 'iznajd' $ROOT/scripts/collab-launch.sh"
+
 # ── Output ────────────────────────────────────────────────────────────
 total=$(( ${#ok[@]} + ${#failures[@]} ))
 if [ "$JSON" = "1" ]; then

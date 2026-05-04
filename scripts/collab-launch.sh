@@ -290,13 +290,15 @@ detect_template() {
   if echo "$task_lower" | grep -qE '\b(adversarial|red.team|red team|stress.test)\b'; then
     printf 'adversarial'; return
   fi
-  # Alien thinking — out-of-the-box, cross-domain divergence. Triggered by
-  # explicit keywords in EN or SI. The intent is "we're stuck in local optima,
-  # find a genuinely unconventional approach" — different from "research"
-  # (which favors thorough exploration of known options).
-  # SI roots: `nekonvencionalno`, `tujerodno`, `divje`, `eksotično`, `nori
-  # pristopi` (the latter is two-word so we match the stem).
-  if echo "$task_lower" | grep -qE '\b(alien.thinking|alien thinking|out.of.the.box|out of the box|out.of.box|outside.the.box|unconventional|divergent.thinking|wild.ideas|moonshot|moon.shot)\b|\b(nekonvencion|tujerodn|nor[ia].pristop|divj[ie].ide|eksotičn)'; then
+  # Alien thinking — DEPLOYS the INVENTION-PROTOCOL.md tools (TRIZ Ideal
+  # Final Result, Via Negativa, Pre-mortem, Inversion, Second-order chain,
+  # Forcing Functions). Triggered by:
+  #   - "alien" / "out-of-the-box" / "unconventional" framings
+  #   - "invent" / "iznajdi" — the protocol's own trigger keywords
+  #   - "figure out a way" / "novel solution" / "create something new"
+  # SI roots: `nekonvencion`, `tujerod`, `divje ideje`, `eksotičn`, `iznajd`
+  # (matches iznajdi / iznajdba / iznajdljivost), `inovativn`, `čisto nov`.
+  if echo "$task_lower" | grep -qE '\b(alien.thinking|alien thinking|out.of.the.box|out of the box|out.of.box|outside.the.box|unconventional|divergent.thinking|wild.ideas|moonshot|moon.shot|invent|figure.out.a.way|novel.solution|create.something.new|brand.new.approach)\b|\b(iznajd|inovativn|nekonvencion|tujerodn|nor[ia].pristop|divj[ie].ide|eksotičn|čisto.nov)'; then
     printf 'alien-thinking'; return
   fi
   if echo "$task_lower" | grep -qE '\b(crypto.strategy|trading.strategy|backtest|paper.trading|backtesting)\b'; then
