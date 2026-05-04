@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import Database from 'better-sqlite3'
 import {
   classifyMemory,
   loadRetentionRules,
@@ -152,7 +153,6 @@ describe('runMemoryGc — end-to-end with sqlite (dbPath override avoids module-
   let dbPath: string
 
   function createMemoriesTable(file: string) {
-    const Database = require('better-sqlite3') as typeof import('better-sqlite3')
     const db = new Database(file)
     db.exec(`
       CREATE TABLE memories (
@@ -193,7 +193,6 @@ describe('runMemoryGc — end-to-end with sqlite (dbPath override avoids module-
     expect(r.dryRun).toBe(true)
     expect(r.perRule.find(x => x.rule.tagPattern === 'reflection')?.matched).toBe(1)
     // But the row is still in the DB
-    const Database = require('better-sqlite3') as typeof import('better-sqlite3')
     const verify = new Database(dbPath, { readonly: true })
     const remaining = verify.prepare<[], { c: number }>('SELECT count(*) as c FROM memories').get()!
     verify.close()
@@ -213,7 +212,6 @@ describe('runMemoryGc — end-to-end with sqlite (dbPath override avoids module-
     expect(r.preserved).toBe(2)
 
     // Verify directly: old-r gone, others remain.
-    const Database = require('better-sqlite3') as typeof import('better-sqlite3')
     const verify = new Database(dbPath, { readonly: true })
     const remainingKeys = verify.prepare<[], { key: string }>('SELECT key FROM memories').all().map(r => r.key)
     verify.close()

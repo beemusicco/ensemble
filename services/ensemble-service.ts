@@ -28,6 +28,7 @@ import {
 import { queryMemories, queryMemoriesSemantic, writeMemory } from '../lib/memory-store'
 import { TAG as LEARN_TAG, weightLearning } from '../lib/auto-learn'
 import * as cognee from '../lib/cognee-bridge'
+import { computeCalibration, recommendRoleAssignments } from '../lib/calibration'
 import { readProjectConfigText } from '../lib/project-config'
 import { scanAndAnswerUnknowns, flagAssumptions } from '../lib/unknown-watcher'
 import { scanAndDispatchQuestions, answerQuestion, type AnswerInput, type AnswerResult } from '../lib/question-watcher'
@@ -1886,9 +1887,8 @@ function applyCalibrationRoleAssignment(
     return { request, reasons: [] }
   }
 
-  let calibration: ReturnType<typeof import('../lib/calibration').computeCalibration>
+  let calibration: ReturnType<typeof computeCalibration>
   try {
-    const { computeCalibration } = require('../lib/calibration') as typeof import('../lib/calibration')
     calibration = computeCalibration({ windowDays: 30 })
   } catch {
     return { request, reasons: [] }
@@ -1901,9 +1901,8 @@ function applyCalibrationRoleAssignment(
   // Map each templated role name to a calibration role-class.
   const calibrationRoles = templateRoles.map(roleClassForCalibration)
 
-  let recs: ReturnType<typeof import('../lib/calibration').recommendRoleAssignments>
+  let recs: ReturnType<typeof recommendRoleAssignments>
   try {
-    const { recommendRoleAssignments } = require('../lib/calibration') as typeof import('../lib/calibration')
     recs = recommendRoleAssignments({
       programs,
       roles: calibrationRoles,
