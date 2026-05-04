@@ -26,6 +26,7 @@ import {
   collabBridgeResult, ensureCollabDirs, collabMessagesFile,
 } from '../lib/collab-paths'
 import { queryMemories, queryMemoriesSemantic, writeMemory } from '../lib/memory-store'
+import { TAG as LEARN_TAG, weightLearning } from '../lib/auto-learn'
 import { readProjectConfigText } from '../lib/project-config'
 import { scanAndAnswerUnknowns, flagAssumptions } from '../lib/unknown-watcher'
 import { scanAndDispatchQuestions, answerQuestion, type AnswerInput, type AnswerResult } from '../lib/question-watcher'
@@ -1572,12 +1573,50 @@ export function buildPromptPreview(params: {
   // recency approach surfaced random recent libro memories regardless of
   // whether they were relevant to "fix WebSocket reconnect bug". Now the
   // system pulls top-5 most semantically similar to THIS task.
+  // W4 self-upgrading: in addition to general semantic memories, fetch
+  // pattern memories (failure-pattern + confab-pattern + resolution) with
+  // outcome + recency weighting so prior team failures TEACH the next team.
+  // Writes to these tags happen automatically in lib/auto-learn.ts hooks.
   let memoriesBlock = ''
   try {
     const project = currentProjectFromCwd(params.workingDirectory)
-    let chosen = [] as Array<{ key: string; value: string; tags: string[] }>
+    let chosen = [] as Array<{ id?: string; key: string; value: string; tags: string[]; createdAt?: string; score?: number }>
+
+    // ── Pattern-memory pull (HIGH priority, project-scoped) ─────────
+    // Failures tell the team what NOT to do; resolutions tell what works;
+    // confab-patterns tighten the agent's citation discipline. We pull
+    // a generous pool, apply weight* (outcome + recency decay), then keep
+    // top-3 patterns. Pattern memories ALWAYS rank ahead of general
+    // semantic memories because they carry concrete prior-team evidence.
+    const patternTags = [LEARN_TAG.FAILURE_PATTERN, LEARN_TAG.CONFAB_PATTERN, LEARN_TAG.RESOLUTION]
+    const patternsRaw = queryMemoriesSemantic(params.description || '', {
+      scope: 'global',
+      tags: patternTags,
+      pool: 200,
+      limit: 20,
+    })
+    const projectFilter = project
+      ? (m: { tags: string[] }) =>
+          // Patterns survive iff they EITHER match this project's domain
+          // tags OR carry no project tag at all. Cross-project patterns
+          // (e.g. confab-pattern from a totally unrelated repo) are kept
+          // out so an agent doesn't get warned about a path that only
+          // makes sense in another project.
+          m.tags.includes(project) ||
+          !m.tags.some((t: string) => ALL_PROJECT_TAGS.has(t))
+      : () => true
+    const patterns = patternsRaw
+      .filter(projectFilter)
+      .map(m => ({
+        ...m,
+        score: weightLearning((m as { score?: number }).score ?? 1, m.tags, m.createdAt),
+      }))
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .slice(0, 3)
+
+    // ── General semantic pool (existing logic) ──────────────────────
+    let general: typeof chosen = []
     if (project) {
-      // Build tag filter (project's domain tags) + exclude-other-projects list.
       const projectTags = PROJECT_DOMAIN_TAGS[project]
       const includeTags = projectTags ? Array.from(projectTags) : [project]
       const otherProjectTags: string[] = []
@@ -1587,43 +1626,61 @@ export function buildPromptPreview(params: {
           if (!includeTags.includes(t)) otherProjectTags.push(t)
         }
       }
-      // Semantic match against project-tagged candidates first.
-      const semantic = queryMemoriesSemantic(params.description || '', {
+      // Exclude pattern tags from the general pool so we don't double-count
+      // a memory that already shows up in `patterns`.
+      general = queryMemoriesSemantic(params.description || '', {
         scope: 'global',
         tags: includeTags,
-        excludeTags: otherProjectTags,
+        excludeTags: [...otherProjectTags, ...patternTags],
         pool: 200,
         limit: 5,
       })
-      chosen = semantic
-      // If too few hits, pad with recency-based generic memories (no
-      // cross-project tags).
-      const remaining = 5 - chosen.length
+      const remaining = 5 - general.length
       if (remaining > 0) {
         const pool = queryMemories({ scope: 'global', limit: 50 })
-        const chosenIds = new Set(chosen.map(t => (t as { id?: string }).id))
+        const chosenIds = new Set([
+          ...patterns.map(p => p.id),
+          ...general.map(g => g.id),
+        ])
         const generic = pool.filter(m =>
-          !chosenIds.has(m.id) && !isTaggedWithDifferentProject(m, project)
+          !chosenIds.has(m.id) &&
+          !isTaggedWithDifferentProject(m, project) &&
+          !m.tags.some(t => patternTags.includes(t as typeof LEARN_TAG.FAILURE_PATTERN))
         )
-        chosen = [...chosen, ...generic.slice(0, remaining)]
+        general = [...general, ...generic.slice(0, remaining)]
       }
     } else {
-      // Unknown project — semantic across the whole store.
-      chosen = queryMemoriesSemantic(params.description || '', {
+      general = queryMemoriesSemantic(params.description || '', {
         scope: 'global',
+        excludeTags: patternTags,
         pool: 200,
         limit: 5,
       })
-      if (chosen.length === 0) {
-        chosen = queryMemories({ scope: 'global', limit: 5 })
+      if (general.length === 0) {
+        general = queryMemories({ scope: 'global', limit: 5 })
       }
     }
+    chosen = [...patterns, ...general]
+
     if (chosen.length) {
-      const lines = chosen.map(m => {
+      const renderEntry = (m: typeof chosen[0]) => {
         const tags = m.tags.length ? ` [${m.tags.join(',')}]` : ''
         return `  - ${m.key}${tags}: ${m.value.slice(0, 200)}`
-      }).join('\n')
-      memoriesBlock = `TEAM MEMORIES (semantically matched to your task — apply when relevant):\n${lines}\n---\n`
+      }
+      const sections: string[] = []
+      if (patterns.length) {
+        sections.push([
+          `🧠 PRIOR-TEAM PATTERNS (apply BEFORE you start — failures, confabs, and fixes from past collabs):`,
+          patterns.map(renderEntry).join('\n'),
+        ].join('\n'))
+      }
+      if (general.length) {
+        sections.push([
+          `📚 RELATED MEMORIES (semantically matched to your task):`,
+          general.map(renderEntry).join('\n'),
+        ].join('\n'))
+      }
+      memoriesBlock = sections.join('\n\n') + '\n---\n'
     }
   } catch {
     memoriesBlock = ''
@@ -2361,9 +2418,22 @@ export async function disbandTeam(
   // Pre-kill reflection: ask each active local agent to privately note
   // ONE thing they'd do differently + ONE thing the next team must know.
   // Saved as memories with tag [reflection] so future collabs see them in
-  // TEAM MEMORIES via semantic match. Opt-IN via ENSEMBLE_REFLECTION=1
-  // (default off until empirical hit-rate is verified).
-  if (process.env['ENSEMBLE_REFLECTION'] === '1') {
+  // TEAM MEMORIES via semantic match.
+  //
+  // W4: flipped to opt-OUT (was opt-IN). Reflection collection takes ~25s
+  // post-disband but disband is async (operator doesn't wait), so the
+  // overhead is invisible. With reflections collected on every team, the
+  // memory pool grows ~5x faster and pattern memories from auto-learn.ts
+  // have peer reflections to anchor against.
+  //
+  // Toggle: ENSEMBLE_REFLECTION=0 disables. Auto-disabled under vitest
+  // (mocked tmux runtime can't satisfy the 25s paste-and-wait — tests
+  // would all time out). VITEST is auto-set by the vitest runner.
+  const reflectionEnabled =
+    process.env['ENSEMBLE_REFLECTION'] !== '0'
+    && !process.env['VITEST']
+    && process.env['NODE_ENV'] !== 'test'
+  if (reflectionEnabled) {
     try {
       await collectAgentReflections(team)
     } catch (err) {

@@ -13,6 +13,7 @@ import { postRemoteSessionCommand } from './agent-spawner'
 import { loadBulletproofConfig } from './bulletproof-config'
 import { runVerifyChecks, formatVerifySummary, type VerifyRunSummary } from './verify-runner'
 import { scanCitations, findConfabulations, formatConfabulationWarning, buildSearchIndex } from './confabulation-guard'
+import { recordFailureLearning, recordConfabLearning } from './auto-learn'
 import fs from 'fs'
 import path from 'path'
 
@@ -359,8 +360,63 @@ export class StagedWorkflowManager {
             confabulationCount,
           },
         })
+
+        // W4: persist a failure-pattern learning so the next team in this
+        // project gets pre-flight warned and doesn't re-discover the same
+        // gate failure. Fire-and-forget — don't block the team's lifecycle.
+        if (stillMechFail && verifyRunSummary) {
+          try {
+            const failedChecks = verifyRunSummary.results.filter(r => r.status === 'fail' || r.status === 'error')
+            const teamWithCwd = this.options.team as EnsembleTeam & { workingDirectory?: string }
+            for (const check of failedChecks) {
+              recordFailureLearning({
+                teamId: this.options.team.id,
+                project: this.detectProjectTag(teamWithCwd.workingDirectory),
+                gateId: check.id,
+                errorSignature: check.output.slice(0, 600),
+                blockers: this.summarizeBlockerLines(finalVerifyMessages),
+                iterationsTried: this.config.maxFixIterations,
+              })
+            }
+          } catch (err) {
+            // Memory write failure must never break the team's flow.
+            console.warn(`[auto-learn] failure-pattern write failed: ${(err as Error).message}`)
+          }
+        }
       }
     }
+  }
+
+  /**
+   * Best-effort project-tag derivation from a workingDirectory. Falls back
+   * to the basename when no recognized project name matches. Mirrors the
+   * detection used by services/ensemble-service.ts:currentProjectFromCwd
+   * but kept local here to avoid a circular import.
+   */
+  private detectProjectTag(workingDirectory?: string): string | undefined {
+    if (!workingDirectory) return undefined
+    return path.basename(workingDirectory)
+  }
+
+  /**
+   * Extract up to 6 blocker-shaped lines from agent VERIFY-phase messages,
+   * for inclusion in the failure-pattern learning. Same heuristic as
+   * summarizeBlockers (line-marker / no-go keyword) but capped tighter.
+   */
+  private summarizeBlockerLines(verifyMessages: ReturnType<typeof getMessages>): string[] {
+    const out: string[] = []
+    for (const m of verifyMessages) {
+      if (!hasNoGoMarker(m.content)) continue
+      for (const raw of m.content.split('\n')) {
+        const line = raw.trim()
+        if (!line) continue
+        if (/^[•*-]\s+/.test(line) || /^\d+[.)]\s+/.test(line) || /\b(blocker|no[-_ ]go|fail(ed)?|reject(ed)?)\b/i.test(line)) {
+          out.push(line.slice(0, 200))
+          if (out.length >= 6) return out
+        }
+      }
+    }
+    return out
   }
 
   /**
@@ -495,6 +551,23 @@ export class StagedWorkflowManager {
           meta: { event: 'confabulation', agent: m.from, citation: c.rawCitation },
         })
         total++
+
+        // W4: persist a per-(agent, citation-shape, project) confab learning
+        // so the next time this same agent spawns in this project, its role
+        // prompt warns about the recurring confabulation pattern. Fire-and-
+        // forget — never block the team's flow on a memory write.
+        try {
+          const teamWithCwd = this.options.team as EnsembleTeam & { workingDirectory?: string }
+          recordConfabLearning({
+            teamId: this.options.team.id,
+            project: this.detectProjectTag(teamWithCwd.workingDirectory),
+            agent: m.from,
+            badCitation: c.rawCitation,
+            derivedReal: (c as { closestPath?: string }).closestPath,
+          })
+        } catch (err) {
+          console.warn(`[auto-learn] confab-pattern write failed: ${(err as Error).message}`)
+        }
       }
     }
     return total
@@ -521,7 +594,7 @@ export class StagedWorkflowManager {
       for (const raw of m.content.split('\n')) {
         const line = raw.trim()
         if (!line) continue
-        if (/^[•*\-]\s+/.test(line) || /^\d+[.)]\s+/.test(line) || /\b(blocker|no[-_ ]go|fail(ed)?|reject(ed)?|unfixed|missing|broken)\b/i.test(line)) {
+        if (/^[•*-]\s+/.test(line) || /^\d+[.)]\s+/.test(line) || /\b(blocker|no[-_ ]go|fail(ed)?|reject(ed)?|unfixed|missing|broken)\b/i.test(line)) {
           lines.push(`  ${line}`)
         }
         if (lines.length >= 12) break
