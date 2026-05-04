@@ -82,7 +82,13 @@ jobs:
           test -n "$TID"
 
       - name: Assert template auto-detected
-        run: grep -q "Template: debug" /tmp/launch.out
+        # Block scalar (`run: |`) so YAML doesn't parse the colon inside
+        # "Template: debug" as a mapping separator. The inline `run: grep -q
+        # "Template: debug"` form returns "mapping values are not allowed
+        # here" on line 85 because YAML's flow-scalar parser keeps scanning
+        # past the closing quote and re-encounters the colon.
+        run: |
+          grep -q "Template: debug" /tmp/launch.out
 
       - name: Assert expert injected into prompt
         run: |
