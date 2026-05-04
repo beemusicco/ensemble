@@ -89,7 +89,27 @@ export async function spawnLocalAgent(options: SpawnAgentOptions): Promise<Spawn
   // Start the AI program
   const startCommand = resolveStartCommand(options.program)
 
-  // Forward ENSEMBLE_* and agent-specific env vars to tmux session
+  // Forward ENSEMBLE_* and agent-specific env vars to tmux session.
+  //
+  // CRITICAL: zsh history-expansion `!` is processed at PARSE time, BEFORE
+  // any command on the line runs. So `set +H` on the SAME line as
+  // `export PW="value!"` won't help — the `!` is expanded (or hangs at
+  // `dquote>`) before `set +H` ever executes. The robust fix is to send
+  // `setopt no_bang_hist` on its OWN line FIRST, so it executes and
+  // disables history expansion BEFORE we send the env-export line.
+  //
+  // Production incident 2026-05-04: ENSEMBLE_KG_PASS=BrainAI2026! caused
+  // every spawn to hang at `dquote>` — claude/codex/haiku CLIs never
+  // started, team marked failed with "did not become ready within 180s".
+  // Fix attempt 1: `set +H;` on same line — didn't work (parse-time vs
+  // runtime). Fix attempt 2: escape `!` to `\!` in env value — fragile
+  // (different shells handle `\!` differently). Fix 3 (this one):
+  // separate sendKeys for setopt → guaranteed runtime ordering.
+  await runtime.sendKeys(sessionName, ' setopt no_bang_hist', { literal: true, enter: true })
+  // Brief delay so zsh has time to parse + apply the setopt before
+  // we send the next line containing the `!` env values.
+  await new Promise(r => setTimeout(r, 150))
+
   const envForward = Object.entries(process.env)
     .filter(([k]) => k.startsWith('ENSEMBLE_') || k.startsWith('NVIDIA_') || k.startsWith('OPENAI_') || k.startsWith('ANTHROPIC_'))
     .filter(([, v]) => v)
@@ -98,14 +118,9 @@ export async function spawnLocalAgent(options: SpawnAgentOptions): Promise<Spawn
     .join('; ')
   const envPrefix = envForward ? `${envForward}; ` : ''
 
-  // Use 'nocorrect' to prevent zsh auto-correct prompt; 'set +H' disables
-  // history expansion so env values containing `!` (e.g. passwords like
-  // `BrainAI2026!`) don't trip zsh's `!history-event` parser and hang the
-  // shell at a `dquote>` prompt. Production incident 2026-05-04: every
-  // ENSEMBLE_KG_PASS spawn hung, agents never reached ready, team failed
-  // with "did not become ready within 180s". Add leading space to avoid
-  // tmux swallowing first char.
-  await runtime.sendKeys(sessionName, ` set +H; nocorrect unset CLAUDECODE; ${envPrefix}${startCommand}`, { literal: true, enter: true })
+  // `nocorrect` prevents zsh auto-correct prompt. Leading space avoids
+  // tmux swallowing the first char.
+  await runtime.sendKeys(sessionName, ` nocorrect unset CLAUDECODE; ${envPrefix}${startCommand}`, { literal: true, enter: true })
 
   console.log(`[Spawner] Agent ${options.name} started in tmux session ${sessionName}`)
 
