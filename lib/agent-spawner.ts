@@ -98,8 +98,14 @@ export async function spawnLocalAgent(options: SpawnAgentOptions): Promise<Spawn
     .join('; ')
   const envPrefix = envForward ? `${envForward}; ` : ''
 
-  // Use 'nocorrect' to prevent zsh auto-correct prompt, and add leading space to avoid tmux swallowing first char
-  await runtime.sendKeys(sessionName, ` nocorrect unset CLAUDECODE; ${envPrefix}${startCommand}`, { literal: true, enter: true })
+  // Use 'nocorrect' to prevent zsh auto-correct prompt; 'set +H' disables
+  // history expansion so env values containing `!` (e.g. passwords like
+  // `BrainAI2026!`) don't trip zsh's `!history-event` parser and hang the
+  // shell at a `dquote>` prompt. Production incident 2026-05-04: every
+  // ENSEMBLE_KG_PASS spawn hung, agents never reached ready, team failed
+  // with "did not become ready within 180s". Add leading space to avoid
+  // tmux swallowing first char.
+  await runtime.sendKeys(sessionName, ` set +H; nocorrect unset CLAUDECODE; ${envPrefix}${startCommand}`, { literal: true, enter: true })
 
   console.log(`[Spawner] Agent ${options.name} started in tmux session ${sessionName}`)
 
