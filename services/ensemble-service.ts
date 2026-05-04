@@ -41,7 +41,7 @@ import { spawn, exec, execFile } from 'child_process'
 import { promisify } from 'util'
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
-import { createWorktree, mergeWorktree, destroyWorktree, uncommittedChanges, evaluateWorktreeDisposition, detectCrossAgentOverlap, type WorktreeInfo, type WorktreeDisposition, type CrossAgentOverlap } from '../lib/worktree-manager'
+import { createWorktree, mergeWorktree, destroyWorktree, uncommittedChanges, evaluateWorktreeDisposition, detectCrossAgentOverlap, classifyAgentBranch, resolveOverlapByForwardBias, type WorktreeInfo, type WorktreeDisposition, type CrossAgentOverlap } from '../lib/worktree-manager'
 import { runStagedWorkflow } from '../lib/staged-workflow'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -2505,50 +2505,103 @@ export async function disbandTeam(
         basePath,
       )
       if (overlapDetected) {
-        for (const a of overlapDetected.agents) overlapSkippedAgents.add(a)
+        // W5 forward-bias autonomous resolver: classify each overlapping
+        // branch by net LOC + revert-commit presence, pick a winner that
+        // gets merged, demote losers (reverts or substantially-smaller
+        // forward work). Falls back to "preserve all" if no clear winner
+        // (close call between two legit forward branches).
+        const classifications = await Promise.all(
+          overlapDetected.agents.map(name => {
+            const a = agentsWithWorktrees.find(x => x.name === name)!
+            return classifyAgentBranch(name, a.worktreeBranch!, basePath)
+          }),
+        )
+        const resolution = process.env['ENSEMBLE_AUTONOMOUS_MERGE'] === '0'
+          ? null  // operator opted out — always preserve-all on overlap
+          : resolveOverlapByForwardBias(classifications)
+
         const filesPreview = overlapDetected.files.slice(0, 10)
         const filesMore = overlapDetected.files.length > 10
           ? `\n  … (${overlapDetected.files.length - 10} more)`
           : ''
-        const recoveryLines = overlapDetected.agents.map(name => {
-          const a = agentsWithWorktrees.find(x => x.name === name)
-          return `  - ${name}:  git diff $(git merge-base HEAD ${a?.worktreeBranch}) ${a?.worktreeBranch}`
-        }).join('\n')
-        appendMessage(teamId, {
-          id: uuidv4(), teamId, from: 'ensemble', to: 'team',
-          content: [
-            `⚠️ Cross-agent file overlap detected — auto-merge SKIPPED for ${overlapDetected.agents.length} agent(s).`,
-            ``,
-            `Files touched by 2+ agents (revert/overwrite risk):`,
-            ...filesPreview.map(f => `  - ${f}`),
-            filesMore,
-            ``,
-            `Branches preserved for operator review:`,
-            recoveryLines,
-            ``,
-            `Pick whichever agent's work to keep, OR cherry-pick selectively across them.`,
-            `Why: a clean sequential merge would silently overwrite prior agents' work — most`,
-            `commonly when one agent reverts what others added. Git can't tell that apart from`,
-            `"valid forward work" because reverts apply without conflict.`,
-          ].filter(Boolean).join('\n'),
-          type: 'chat', timestamp: new Date().toISOString(),
-          meta: {
-            event: 'cross_agent_overlap',
-            files: overlapDetected.files,
-            agents: overlapDetected.agents,
-            fileToAgents: overlapDetected.fileToAgents,
-          },
-        })
-        // W4 auto-learn: persist a failure-pattern so the next team in
-        // the same project gets pre-flight warned about overlap-prone
-        // files. Fire-and-forget — never block disband on memory write.
+
+        if (resolution) {
+          // Auto-resolved: only losers go into overlapSkippedAgents.
+          // Winner falls through to the normal merge pass.
+          for (const loser of resolution.losers) {
+            overlapSkippedAgents.add(loser.agentName)
+          }
+          const loserLines = resolution.losers.map(l => `  - ${l.agentName}: ${l.reason}`).join('\n')
+          appendMessage(teamId, {
+            id: uuidv4(), teamId, from: 'ensemble', to: 'team',
+            content: [
+              `🤖 Cross-agent overlap auto-resolved (forward-bias rule).`,
+              ``,
+              `Files touched by 2+ agents:`,
+              ...filesPreview.map(f => `  - ${f}`),
+              filesMore,
+              ``,
+              `WINNER (auto-merged): ${resolution.winner}`,
+              `  ${resolution.winnerReason}`,
+              ``,
+              `LOSERS (branch preserved, NOT merged):`,
+              loserLines,
+              ``,
+              `If you disagree with the auto-pick: each loser branch is intact in`,
+              `.worktrees/<teamId>-<agent>/. Cherry-pick what you want, or revert the winner.`,
+              `Set ENSEMBLE_AUTONOMOUS_MERGE=0 to disable this and always preserve-all on overlap.`,
+            ].filter(Boolean).join('\n'),
+            type: 'chat', timestamp: new Date().toISOString(),
+            meta: {
+              event: 'cross_agent_overlap_auto_resolved',
+              files: overlapDetected.files,
+              winner: resolution.winner,
+              winnerReason: resolution.winnerReason,
+              losers: resolution.losers,
+              fileToAgents: overlapDetected.fileToAgents,
+            },
+          })
+        } else {
+          // No clear winner — preserve all (W4 fallback).
+          for (const a of overlapDetected.agents) overlapSkippedAgents.add(a)
+          const recoveryLines = overlapDetected.agents.map(name => {
+            const a = agentsWithWorktrees.find(x => x.name === name)
+            return `  - ${name}:  git diff $(git merge-base HEAD ${a?.worktreeBranch}) ${a?.worktreeBranch}`
+          }).join('\n')
+          appendMessage(teamId, {
+            id: uuidv4(), teamId, from: 'ensemble', to: 'team',
+            content: [
+              `⚠️ Cross-agent overlap with no clear winner — auto-merge SKIPPED for ${overlapDetected.agents.length} agent(s).`,
+              ``,
+              `Files touched by 2+ agents (revert/overwrite risk):`,
+              ...filesPreview.map(f => `  - ${f}`),
+              filesMore,
+              ``,
+              `Why no auto-pick: branches are within 20% LOC of each other OR all contain revert commits.`,
+              ``,
+              `Branches preserved for operator review:`,
+              recoveryLines,
+            ].filter(Boolean).join('\n'),
+            type: 'chat', timestamp: new Date().toISOString(),
+            meta: {
+              event: 'cross_agent_overlap',
+              files: overlapDetected.files,
+              agents: overlapDetected.agents,
+              fileToAgents: overlapDetected.fileToAgents,
+            },
+          })
+        }
+
+        // W4 auto-learn: persist a failure-pattern either way so the next
+        // team in the same project gets pre-flight warned about overlap-
+        // prone files. Fire-and-forget — never block disband on memory write.
         try {
           const { recordFailureLearning } = await import('../lib/auto-learn')
           recordFailureLearning({
             teamId,
             project: team.workingDirectory ? path.basename(team.workingDirectory) : undefined,
             gateId: 'cross-agent-overlap',
-            errorSignature: `Files: ${overlapDetected.files.slice(0, 5).join(', ')}. Agents: ${overlapDetected.agents.join(', ')}.`,
+            errorSignature: `Files: ${overlapDetected.files.slice(0, 5).join(', ')}. Agents: ${overlapDetected.agents.join(', ')}.${resolution ? ` Auto-resolved: winner=${resolution.winner}.` : ' No auto-resolution.'}`,
             blockers: overlapDetected.files.slice(0, 6),
             iterationsTried: 0,
           })

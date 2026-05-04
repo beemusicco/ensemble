@@ -99,6 +99,16 @@ check "overlap:emits-structured-alert" "grep -q \"event: 'cross_agent_overlap'\"
 check "overlap:writes-failure-learning" "grep -q \"gateId: 'cross-agent-overlap'\" $ROOT/services/ensemble-service.ts"
 check "overlap:tests-exist" "test -f $ROOT/tests/cross-agent-overlap.test.ts"
 
+# ── Primitive 8: forward-bias autonomous overlap resolver (W5) ───────
+check "fwd-bias:classifier-exported" "grep -q 'export async function classifyAgentBranch' $ROOT/lib/worktree-manager.ts"
+check "fwd-bias:resolver-exported" "grep -q 'export function resolveOverlapByForwardBias' $ROOT/lib/worktree-manager.ts"
+check "fwd-bias:detects-revert-subject" "grep -q 'Revert\\\\s' $ROOT/lib/worktree-manager.ts"
+check "fwd-bias:detects-revert-body" "grep -q 'This reverts commit' $ROOT/lib/worktree-manager.ts"
+check "fwd-bias:close-call-margin" "grep -q '0.2' $ROOT/lib/worktree-manager.ts"
+check "fwd-bias:wired-in-disband" "grep -q 'resolveOverlapByForwardBias(' $ROOT/services/ensemble-service.ts"
+check "fwd-bias:operator-opt-out-env" "grep -q 'ENSEMBLE_AUTONOMOUS_MERGE' $ROOT/services/ensemble-service.ts"
+check "fwd-bias:tests-exist" "test -f $ROOT/tests/forward-bias-resolver.test.ts"
+
 # ── Output ────────────────────────────────────────────────────────────
 total=$(( ${#ok[@]} + ${#failures[@]} ))
 if [ "$JSON" = "1" ]; then

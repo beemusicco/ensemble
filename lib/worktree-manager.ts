@@ -151,6 +151,155 @@ export async function detectCrossAgentOverlap(
 }
 
 /**
+ * Classify a single agent branch by its work pattern. Used by the
+ * forward-bias autonomous resolver — branches with revert commits or
+ * net-negative LOC are demoted in favor of forward-work branches.
+ */
+export interface BranchClassification {
+  branch: string
+  agentName: string
+  insertions: number
+  deletions: number
+  netLoc: number              // insertions - deletions
+  filesChanged: number
+  hasRevertCommit: boolean    // any commit message starts with "Revert" or contains "This reverts commit"
+  commitCount: number
+}
+
+export async function classifyAgentBranch(
+  agentName: string,
+  branch: string,
+  basePath: string,
+  baseBranch?: string,
+): Promise<BranchClassification> {
+  const baseRef = baseBranch ?? (await resolveDefaultBranchRef(basePath)) ?? 'HEAD'
+  let insertions = 0
+  let deletions = 0
+  let filesChanged = 0
+  try {
+    const { stdout } = await execFileAsync(
+      'git', ['diff', '--shortstat', `${baseRef}...${branch}`],
+      { cwd: basePath },
+    )
+    insertions  = parseInt(stdout.match(/(\d+)\s+insertion/)?.[1] || '0', 10)
+    deletions   = parseInt(stdout.match(/(\d+)\s+deletion/)?.[1] || '0', 10)
+    filesChanged = parseInt(stdout.match(/(\d+)\s+file/)?.[1] || '0', 10)
+  } catch { /* branch missing or no commits — keep zeros */ }
+
+  let hasRevertCommit = false
+  let commitCount = 0
+  try {
+    const { stdout } = await execFileAsync(
+      'git', ['log', '--format=%s%n%b%n----COMMIT-END----', `${baseRef}..${branch}`],
+      { cwd: basePath },
+    )
+    commitCount = (stdout.match(/----COMMIT-END----/g) || []).length
+    // Match "Revert " at the start of a line (subject prefix), OR
+    // "This reverts commit <sha>" anywhere (git revert default body).
+    hasRevertCommit = /^Revert\s|^revert\s|^Revert "|This reverts commit /m.test(stdout)
+  } catch { /* ignore */ }
+
+  return {
+    branch, agentName,
+    insertions, deletions,
+    netLoc: insertions - deletions,
+    filesChanged,
+    hasRevertCommit,
+    commitCount,
+  }
+}
+
+/**
+ * Forward-bias autonomous resolver. Given an overlap and per-branch
+ * classifications, decides which branch to merge (winner) and which
+ * to skip (losers). Returns null when there's no clear winner — the
+ * caller should fall back to "preserve all" in that case.
+ *
+ * Rules (in order of evaluation):
+ *   1. If exactly one branch has NO revert commits AND others all do,
+ *      that branch wins regardless of LOC (clear forward vs revert).
+ *   2. Among branches with no revert commits, the one with highest
+ *      netLoc wins. Tie-break by filesChanged.
+ *   3. Safety: if the winner's netLoc is within 20% of the runner-up
+ *      (i.e. close call), return null — preserve all for operator.
+ *      Reverts always lose this tie-break (bias against silent undo).
+ *   4. If ALL branches have revert commits OR all have netLoc <= 0,
+ *      return null — operator must pick.
+ */
+export interface ResolveOverlapResult {
+  winner: string                              // agentName
+  winnerReason: string                        // human-readable
+  losers: Array<{ agentName: string; reason: string }>
+}
+
+export function resolveOverlapByForwardBias(
+  classifications: BranchClassification[],
+): ResolveOverlapResult | null {
+  if (classifications.length < 2) return null
+
+  // Bucket by revert presence.
+  const forwardOnly = classifications.filter(c => !c.hasRevertCommit)
+  const reverts = classifications.filter(c => c.hasRevertCommit)
+
+  // Rule 1: exactly one forward branch, others all reverts → clear winner.
+  if (forwardOnly.length === 1 && reverts.length >= 1) {
+    const winner = forwardOnly[0]
+    if (winner.netLoc > 0) {
+      return {
+        winner: winner.agentName,
+        winnerReason: `only branch with no revert commits (+${winner.insertions}/-${winner.deletions} LOC across ${winner.filesChanged} files)`,
+        losers: reverts.map(c => ({
+          agentName: c.agentName,
+          reason: `revert commit detected (subject contains "Revert" or body contains "This reverts commit")`,
+        })),
+      }
+    }
+  }
+
+  // Rule 4 trigger: all branches reverted or none added net work.
+  if (forwardOnly.length === 0) return null
+  const positiveForward = forwardOnly.filter(c => c.netLoc > 0)
+  if (positiveForward.length === 0) return null
+
+  // Rule 2 + 3: pick highest netLoc among forward, but require margin > 20%
+  // over runner-up to avoid auto-picking on close calls.
+  const sorted = [...positiveForward].sort((a, b) => {
+    if (b.netLoc !== a.netLoc) return b.netLoc - a.netLoc
+    return b.filesChanged - a.filesChanged
+  })
+  const winner = sorted[0]
+  const runnerUp = sorted[1]
+  if (runnerUp) {
+    const margin = (winner.netLoc - runnerUp.netLoc) / Math.max(1, winner.netLoc)
+    if (margin < 0.2) {
+      // Close call between two forward-work branches — operator decides.
+      return null
+    }
+  }
+
+  const losers: Array<{ agentName: string; reason: string }> = []
+  for (const c of classifications) {
+    if (c.agentName === winner.agentName) continue
+    if (c.hasRevertCommit) {
+      losers.push({
+        agentName: c.agentName,
+        reason: `revert commit detected (winner has +${winner.netLoc} net LOC vs ${c.netLoc})`,
+      })
+    } else {
+      losers.push({
+        agentName: c.agentName,
+        reason: `lower net work (+${c.netLoc} vs winner's +${winner.netLoc} LOC, >20% margin)`,
+      })
+    }
+  }
+  return {
+    winner: winner.agentName,
+    winnerReason: `highest forward work (+${winner.insertions}/-${winner.deletions} = +${winner.netLoc} net LOC across ${winner.filesChanged} files, no revert commits)`,
+    losers,
+  }
+}
+
+/**
  * Merge changes from a worktree branch back to the target branch.
  * Uses --no-ff to preserve the merge commit for traceability.
  * Returns true if merge succeeded, false if there were conflicts.
