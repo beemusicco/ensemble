@@ -200,6 +200,39 @@ check "counterfactual:in-rigorous-block" "grep -q 'COUNTERFACTUAL MANDATE' $ROOT
 check "counterfactual:requires-Y-alternative" "grep -q 'strongest alternative' $ROOT/services/ensemble-service.ts"
 check "counterfactual:requires-confidence-tag" "grep -q 'X wins on metric' $ROOT/services/ensemble-service.ts"
 
+# ── Primitive 20: monte-carlo template (W9) ────────────────────────
+check "mc:template-exists" "grep -q '\"monte-carlo\":' $ROOT/collab-templates.json"
+check "mc:has-four-roles" "python3 -c 'import json; t=json.load(open(\"$ROOT/collab-templates.json\"))[\"templates\"][\"monte-carlo\"]; assert len(t[\"roles\"])==4'"
+check "mc:has-modeler" "grep -q '\"role\": \"MODELER\"' $ROOT/collab-templates.json"
+check "mc:has-simulator" "grep -q '\"role\": \"SIMULATOR\"' $ROOT/collab-templates.json"
+check "mc:has-analyst" "grep -q '\"role\": \"ANALYST\"' $ROOT/collab-templates.json"
+check "mc:has-critic" "grep -q '\"role\": \"CRITIC\"' $ROOT/collab-templates.json"
+check "mc:keyword-detection" "grep -q 'monte.carlo\\|simulir' $ROOT/scripts/collab-launch.sh"
+
+# ── Primitive 21: causal-dag template (W9) ─────────────────────────
+check "causal:template-exists" "grep -q '\"causal-dag\":' $ROOT/collab-templates.json"
+check "causal:has-three-roles" "python3 -c 'import json; t=json.load(open(\"$ROOT/collab-templates.json\"))[\"templates\"][\"causal-dag\"]; assert len(t[\"roles\"])==3'"
+check "causal:has-dag-builder" "grep -q '\"role\": \"DAG-BUILDER\"' $ROOT/collab-templates.json"
+check "causal:has-confounder-hunter" "grep -q '\"role\": \"CONFOUNDER-HUNTER\"' $ROOT/collab-templates.json"
+check "causal:has-intervention-designer" "grep -q '\"role\": \"INTERVENTION-DESIGNER\"' $ROOT/collab-templates.json"
+check "causal:keyword-detection" "grep -q 'causal.analy\\|confounder' $ROOT/scripts/collab-launch.sh"
+
+# ── Primitive 22: reference-class template (W9) ────────────────────
+check "rcf:template-exists" "grep -q '\"reference-class\":' $ROOT/collab-templates.json"
+check "rcf:has-three-roles" "python3 -c 'import json; t=json.load(open(\"$ROOT/collab-templates.json\"))[\"templates\"][\"reference-class\"]; assert len(t[\"roles\"])==3'"
+check "rcf:has-class-finder" "grep -q '\"role\": \"CLASS-FINDER\"' $ROOT/collab-templates.json"
+check "rcf:has-base-rate-computer" "grep -q '\"role\": \"BASE-RATE-COMPUTER\"' $ROOT/collab-templates.json"
+check "rcf:has-adjuster" "grep -q '\"role\": \"ADJUSTER\"' $ROOT/collab-templates.json"
+check "rcf:keyword-detection" "grep -q 'reference.class\\|base.rate\\|napoved' $ROOT/scripts/collab-launch.sh"
+
+# ── Primitive 23: FMEA structure embedded in alien-thinking ────────
+check "fmea:in-alien-thinking" "grep -q 'FMEA' $ROOT/collab-templates.json"
+check "fmea:has-rpn" "grep -q 'RPN' $ROOT/collab-templates.json"
+
+# ── Primitive 24: Base-rate check embedded in hypothesis-test ──────
+check "base-rate:in-hypothesis-test" "grep -q 'BASE RATE' $ROOT/collab-templates.json"
+check "base-rate:references-kahneman" "grep -q 'Kahneman outside view' $ROOT/collab-templates.json"
+
 # ── Output ────────────────────────────────────────────────────────────
 total=$(( ${#ok[@]} + ${#failures[@]} ))
 if [ "$JSON" = "1" ]; then

@@ -291,6 +291,30 @@ detect_template() {
   if echo "$task_lower" | grep -qE '\b(alien.thinking|alien thinking|out.of.the.box|out of the box|out.of.box|outside.the.box|unconventional|divergent.thinking|wild.ideas|moonshot|moon.shot|invent|figure.out.a.way|novel.solution|create.something.new|brand.new.approach)\b|\b(iznajd|inovativn|nekonvencion|tujerodn|nor[ia].pristop|divj[ie].ide|eksotičn|čisto.nov)'; then
     printf 'alien-thinking'; return
   fi
+  # Monte Carlo — quantitative uncertainty. Triggered BEFORE crypto-strategy
+  # because MC is more specific (uncertainty quantification) than the
+  # generic crypto pipeline. SI roots: `simulir`, `simulacij`, `negotovost`,
+  # `verjetnost`, `tveganj` (matches risk-related Slovenian).
+  # NB: many of these intentionally drop the trailing \b so prefixes like
+  # `analy` match `analysis/analyzed/analytic` and `quantif` matches
+  # `quantification/quantified`. Leading \b is preserved to anchor at
+  # word start — prevents over-match inside unrelated tokens.
+  if echo "$task_lower" | grep -qE '\b(monte.carlo|monte carlo|monte.car[a-z]+|simulate.uncertain|distribution.over|uncertainty.quantif|sensitivity.analy|sobol|bootstrap.resampl|fat.tail|p95.distribution|p99.distribution)|\b(simulir|simulacij|negotovost|verjetnost|tveganj)'; then
+    printf 'monte-carlo'; return
+  fi
+  # Causal DAG — Pearl do-calculus. Triggered for "what caused X / does X
+  # cause Y / intervention design / confounder" framings. Distinct from
+  # `debug` (which is "fix the bug") — causal-dag is "decompose causality".
+  if echo "$task_lower" | grep -qE '\b(causal.analy|causal.dag|do.calculus|confounder|confounding|root.cause.analy|intervention.design|counterfactual.intervention|back.door|front.door)|\b(vzročn|kavzaln)'; then
+    printf 'causal-dag'; return
+  fi
+  # Reference Class Forecasting — Kahneman outside view. Triggered for
+  # explicit forecasting / prediction tasks where base rates matter more
+  # than inside-view enthusiasm. SI: `napoved` (matches napoved/napovedovanje),
+  # `verjetnost.uspeh`, `kako.verjetn`.
+  if echo "$task_lower" | grep -qE '\b(reference.class|outside.view|base.rate|forecast.with.history|forecast.outside|kahneman.forecast|how.likely|probability.of.success|sizing.estimate|rollout.forecast)|\b(napoved|kako.verjetn|baza.podatkov.preteklih)'; then
+    printf 'reference-class'; return
+  fi
   # Premium-quad: high-stakes severity catch-all. Triggers when no purpose
   # template (pentest, alien-thinking) fired but the task is critical.
   # Slovenian roots are matched without trailing \b because Slovenian inflects
@@ -353,7 +377,7 @@ detect_challenge_mode() {
     printf 'sparring'; return
   fi
   case "$2" in
-    premium-quad|ultrareview|pentest|adversarial|crypto-strategy|debug|alien-thinking|hypothesis-test)
+    premium-quad|ultrareview|pentest|adversarial|crypto-strategy|debug|alien-thinking|hypothesis-test|monte-carlo|causal-dag|reference-class)
       printf 'rigorous'; return ;;
   esac
   printf 'normal'
