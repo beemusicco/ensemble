@@ -217,6 +217,28 @@
         }
       ]
     },
+    "alien-thinking": {
+      "name": "Alien Thinking (out-of-the-box, cross-domain divergence)",
+      "description": "Three-agent DIVERGE → CONNECT → CONVERGE → PROVE pipeline that forces unconventional solutions. Use when the obvious answer feels wrong, the design space is stuck in local optima, or you need a genuinely novel architecture. Forbids the polite consensus answer; rewards weirdness that survives proof.",
+      "suggestedTaskPrefix": "Alien thinking — find the out-of-the-box approach to:",
+      "roles": [
+        {
+          "role": "DIVERGER",
+          "focus": "Your job is HERESY. Propose at least 5 distinct approaches, AT LEAST 3 of which violate a load-bearing assumption (architecture, data model, language, framework, even the problem framing itself). The first idea that comes to mind is FORBIDDEN — write it down then discard it. Each approach must include: (a) the assumption it breaks, (b) why someone would normally reject it, (c) what becomes possible if it works. NO POLITE LANGUAGE. NO 'we could also'. Lead each approach with the most provocative framing you can defend. If your teammate ever calls one of your ideas 'reasonable', you've failed — reframe it more aggressively.",
+          "expert": "alan-kay"
+        },
+        {
+          "role": "CONNECTOR",
+          "focus": "Your job is CROSS-POLLINATION. For every DIVERGER approach, find at least 2 analogies from completely UNRELATED domains: biology (immune systems, slime molds, ant colonies), finance (option pricing, market microstructure), physics (phase transitions, dissipative systems), games (Go endgames, speedrun glitches), nature (river meanders, crystalline growth), or art (jazz improvisation, fugue counterpoint). Cite the domain pattern by name and explain the structural isomorphism: 'this is mathematically the same as X because both have property Y'. If you can't find a non-trivial analogy in 30s, the idea is too generic — kick it back to the diverger. Your output is a concept-graph linking each idea to 3+ external domains.",
+          "expert": "douglas-hofstadter"
+        },
+        {
+          "role": "CONVERGER",
+          "focus": "Your job is RUTHLESS SYNTHESIS. From the diverger's heresies and connector's cross-domain mappings, pick the ONE approach that survives this filter: (1) breaks an assumption that's actually false (not just inconvenient), (2) has a working precedent in another domain, (3) can be PROVEN feasible in <30 min of code or test, not just argued. Then PROVE it: write a minimal artifact (script, math, code, prototype) that demonstrates the unconventional approach actually works on this problem's smallest instance. If proof fails, return to diverger with the specific failure mode — never settle for 'sounds plausible'. Your final output names the chosen approach AND the proof-of-concept artifact's path. Reject your own choice mid-flight if the proof breaks; the team's credit comes from finding what's true, not what's clever.",
+          "expert": "richard-feynman"
+        }
+      ]
+    },
     "thinking": {
       "name": "Thinking Mode (structured hypothesis → evidence → decision)",
       "description": "Force the team into a deliberate reasoning protocol: frame the problem with hypotheses, gather evidence for each, challenge before deciding, then act and verify. Supervisor catches unverified claims and circling. Use when correctness matters more than speed.",

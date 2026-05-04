@@ -290,6 +290,15 @@ detect_template() {
   if echo "$task_lower" | grep -qE '\b(adversarial|red.team|red team|stress.test)\b'; then
     printf 'adversarial'; return
   fi
+  # Alien thinking — out-of-the-box, cross-domain divergence. Triggered by
+  # explicit keywords in EN or SI. The intent is "we're stuck in local optima,
+  # find a genuinely unconventional approach" — different from "research"
+  # (which favors thorough exploration of known options).
+  # SI roots: `nekonvencionalno`, `tujerodno`, `divje`, `eksotično`, `nori
+  # pristopi` (the latter is two-word so we match the stem).
+  if echo "$task_lower" | grep -qE '\b(alien.thinking|alien thinking|out.of.the.box|out of the box|out.of.box|outside.the.box|unconventional|divergent.thinking|wild.ideas|moonshot|moon.shot)\b|\b(nekonvencion|tujerodn|nor[ia].pristop|divj[ie].ide|eksotičn)'; then
+    printf 'alien-thinking'; return
+  fi
   if echo "$task_lower" | grep -qE '\b(crypto.strategy|trading.strategy|backtest|paper.trading|backtesting)\b'; then
     printf 'crypto-strategy'; return
   fi
@@ -324,7 +333,7 @@ detect_challenge_mode() {
     printf 'sparring'; return
   fi
   case "$2" in
-    premium-quad|ultrareview|pentest|adversarial|crypto-strategy|debug)
+    premium-quad|ultrareview|pentest|adversarial|crypto-strategy|debug|alien-thinking)
       printf 'rigorous'; return ;;
   esac
   printf 'normal'
