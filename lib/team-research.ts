@@ -97,14 +97,15 @@ async function fetchUrl(url: string): Promise<{ status: 'ok' | 'error'; body?: s
     let total = 0
     const parts: string[] = []
     const dec = new TextDecoder('utf-8', { fatal: false })
-    while (true) {
+    let reading = true
+    while (reading) {
       const { done, value } = await reader.read()
       if (done) break
       total += value.byteLength
       parts.push(dec.decode(value, { stream: true }))
       if (total >= MAX_WEB_BYTES) {
         try { reader.cancel() } catch { /* */ }
-        break
+        reading = false
       }
     }
     parts.push(dec.decode())

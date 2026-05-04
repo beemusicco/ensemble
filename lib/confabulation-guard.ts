@@ -61,7 +61,7 @@ const CODE_EXTS = [
 //   - line is 1-99999
 // We require either a leading word boundary OR the start of a line/quote so
 // we don't capture inside log timestamps like 12:34 or version strings 1.2:3.
-const CITATION_RE = /(^|[\s"'`(\[<])([A-Za-z0-9_\-./]{3,256}\.[A-Za-z0-9]{1,8}):(\d{1,5})(?=\b|$|[\s"'`)\]>,.;:?!])/g
+const CITATION_RE = /(^|[\s"'`([<])([A-Za-z0-9_./-]{3,256}\.[A-Za-z0-9]{1,8}):(\d{1,5})(?=\b|$|[\s"'`)\]>,.;:?!])/g
 
 function isCodeExt(p: string): boolean {
   const ext = p.split('.').pop()?.toLowerCase()
