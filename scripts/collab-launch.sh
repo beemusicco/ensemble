@@ -264,7 +264,35 @@ detect_template() {
   if echo "$task_lower" | grep -qE '\b(audit.only|read.only.audit|read-only.sweep|fix.list|fix-list|inventory.audit)\b|\b(samo.bran|seznam.popravkov|pregled.brez)'; then
     printf 'audit-only'; return
   fi
-  # Premium-quad: high-stakes work (production, irreversible, security-critical).
+  # Pentest — explicit "authorized security testing" pipeline. Distinct
+  # purpose, not severity. Trigger before premium-quad because pentest
+  # roles (RECON → EXPLOIT → VERIFY) replace generic ARCHITECT/IMPLEMENTER
+  # even on critical tasks — the security framing is more specific.
+  if echo "$task_lower" | grep -qE '\b(pentest|pen.test|penetration.test|owasp|security.test|exploit|vuln.scan|vulnerability.scan|cve.scan)\b|\b(ranljivost|napad)'; then
+    printf 'pentest'; return
+  fi
+  # Alien thinking — DEPLOYS the INVENTION-PROTOCOL.md tools (TRIZ Ideal
+  # Final Result, Via Negativa, Pre-mortem, Inversion, Second-order chain,
+  # Forcing Functions). PRIORITY DECISION: alien-thinking comes BEFORE
+  # premium-quad because invention is a PURPOSE template (defines what
+  # roles to play) while premium-quad is a SEVERITY classifier (catch-all
+  # when no specific purpose fires). 2026-05-04 incident: task "iznajdi
+  # mehanizem za X — ⚠️ KRITIČNO: NE DISBAND-AJTE" was routing to
+  # premium-quad (4 generic agents, no creative roles) instead of
+  # alien-thinking (3 agents deploying INVENTION-PROTOCOL tools), because
+  # "kritičn" matched first. Now invention wins the tie — operators
+  # wanting both creative AND high-stakes can override via COLLAB_TEMPLATE.
+  # Triggered by:
+  #   - "alien" / "out-of-the-box" / "unconventional" framings
+  #   - "invent" / "iznajdi" — the protocol's own trigger keywords
+  #   - "figure out a way" / "novel solution" / "create something new"
+  # SI roots: `nekonvencion`, `tujerod`, `divje ideje`, `eksotičn`, `iznajd`
+  # (matches iznajdi / iznajdba / iznajdljivost), `inovativn`, `čisto nov`.
+  if echo "$task_lower" | grep -qE '\b(alien.thinking|alien thinking|out.of.the.box|out of the box|out.of.box|outside.the.box|unconventional|divergent.thinking|wild.ideas|moonshot|moon.shot|invent|figure.out.a.way|novel.solution|create.something.new|brand.new.approach)\b|\b(iznajd|inovativn|nekonvencion|tujerodn|nor[ia].pristop|divj[ie].ide|eksotičn|čisto.nov)'; then
+    printf 'alien-thinking'; return
+  fi
+  # Premium-quad: high-stakes severity catch-all. Triggers when no purpose
+  # template (pentest, alien-thinking) fired but the task is critical.
   # Slovenian roots are matched without trailing \b because Slovenian inflects
   # heavily — `kritično` / `kritičen` / `kritični` / `kritičnost` all share the
   # `kritičn` stem. Same for `produkcija` / `produkcijski` / `produkcijo`,
@@ -279,27 +307,8 @@ detect_template() {
   if echo "$task_lower" | grep -qE '\b(premium.quad|premium quad|critical|live.trading|production.deploy|security|irreversible)\b|\b(kritičn|produkcij|nepovratn)|\bživo[. ]+trgov'; then
     printf 'premium-quad'; return
   fi
-  # Pentest before adversarial — pentest is the more specific "authorized
-  # security testing" pipeline (RECON → EXPLOIT → VERIFY with disclosure
-  # discipline) vs. adversarial's general "stress-test what we just built".
-  # Slovenian roots: `pentest` is loanword; `ranljivost` covers ranljivosti /
-  # ranljivosti, `napad` covers napad / napadi / napadalec.
-  if echo "$task_lower" | grep -qE '\b(pentest|pen.test|penetration.test|owasp|security.test|exploit|vuln.scan|vulnerability.scan|cve.scan)\b|\b(ranljivost|napad)'; then
-    printf 'pentest'; return
-  fi
   if echo "$task_lower" | grep -qE '\b(adversarial|red.team|red team|stress.test)\b'; then
     printf 'adversarial'; return
-  fi
-  # Alien thinking — DEPLOYS the INVENTION-PROTOCOL.md tools (TRIZ Ideal
-  # Final Result, Via Negativa, Pre-mortem, Inversion, Second-order chain,
-  # Forcing Functions). Triggered by:
-  #   - "alien" / "out-of-the-box" / "unconventional" framings
-  #   - "invent" / "iznajdi" — the protocol's own trigger keywords
-  #   - "figure out a way" / "novel solution" / "create something new"
-  # SI roots: `nekonvencion`, `tujerod`, `divje ideje`, `eksotičn`, `iznajd`
-  # (matches iznajdi / iznajdba / iznajdljivost), `inovativn`, `čisto nov`.
-  if echo "$task_lower" | grep -qE '\b(alien.thinking|alien thinking|out.of.the.box|out of the box|out.of.box|outside.the.box|unconventional|divergent.thinking|wild.ideas|moonshot|moon.shot|invent|figure.out.a.way|novel.solution|create.something.new|brand.new.approach)\b|\b(iznajd|inovativn|nekonvencion|tujerodn|nor[ia].pristop|divj[ie].ide|eksotičn|čisto.nov)'; then
-    printf 'alien-thinking'; return
   fi
   if echo "$task_lower" | grep -qE '\b(crypto.strategy|trading.strategy|backtest|paper.trading|backtesting)\b'; then
     printf 'crypto-strategy'; return
