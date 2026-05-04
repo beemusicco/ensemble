@@ -91,6 +91,14 @@ check "pattern-injection:renders-prior-team-block" "grep -q 'PRIOR-TEAM PATTERNS
 check "reflection:default-on" "grep -F \"ENSEMBLE_REFLECTION'] !== '0'\" $ROOT/services/ensemble-service.ts"
 check "reflection:vitest-skip" "grep -q 'process.env..VITEST' $ROOT/services/ensemble-service.ts"
 
+# ── Primitive 7: cross-agent overlap detection (premium-quad coordination) ──
+check "overlap:detector-exported" "grep -q 'export async function detectCrossAgentOverlap' $ROOT/lib/worktree-manager.ts"
+check "overlap:type-exported" "grep -q 'export interface CrossAgentOverlap' $ROOT/lib/worktree-manager.ts"
+check "overlap:wired-in-disband" "grep -q 'detectCrossAgentOverlap(' $ROOT/services/ensemble-service.ts"
+check "overlap:emits-structured-alert" "grep -q \"event: 'cross_agent_overlap'\" $ROOT/services/ensemble-service.ts"
+check "overlap:writes-failure-learning" "grep -q \"gateId: 'cross-agent-overlap'\" $ROOT/services/ensemble-service.ts"
+check "overlap:tests-exist" "test -f $ROOT/tests/cross-agent-overlap.test.ts"
+
 # ── Output ────────────────────────────────────────────────────────────
 total=$(( ${#ok[@]} + ${#failures[@]} ))
 if [ "$JSON" = "1" ]; then

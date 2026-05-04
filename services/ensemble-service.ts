@@ -41,7 +41,7 @@ import { spawn, exec, execFile } from 'child_process'
 import { promisify } from 'util'
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
-import { createWorktree, mergeWorktree, destroyWorktree, uncommittedChanges, evaluateWorktreeDisposition, type WorktreeInfo, type WorktreeDisposition } from '../lib/worktree-manager'
+import { createWorktree, mergeWorktree, destroyWorktree, uncommittedChanges, evaluateWorktreeDisposition, detectCrossAgentOverlap, type WorktreeInfo, type WorktreeDisposition, type CrossAgentOverlap } from '../lib/worktree-manager'
 import { runStagedWorkflow } from '../lib/staged-workflow'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -2480,9 +2480,86 @@ export async function disbandTeam(
 
     // First pass: try merge for completion-confirmed disbands. Track
     // per-agent merge outcomes so the evaluator can mark them as conflict.
+    //
+    // W4 cross-agent overlap detection: BEFORE any merge runs, scan all
+    // agent branches for files-touched-by-2+-agents. If overlap exists,
+    // halt auto-merge for those agents (preserve their branches for
+    // operator review). Non-overlapping agents merge normally.
+    //
+    // Production case driving this: 2026-05-04 R35 premium-quad. codex-4
+    // committed REVERTS of W1/W2/W3 work in its own worktree. Sequential
+    // merge applied claude-1+sonnet-2+codex-3 fine, then codex-4's
+    // reverts applied CLEANLY (no conflict — reverts are designed that
+    // way) and silently undid the prior merges. Operator had to manually
+    // cherry-pick from each branch. Now those four would all be
+    // preserved with a structured alert instead.
     const mergeFailedFor = new Set<string>()
+    const overlapSkippedAgents = new Set<string>()
+    let overlapDetected: CrossAgentOverlap | null = null
+    if (completionConfirmed && agentsWithWorktrees.length >= 2) {
+      overlapDetected = await detectCrossAgentOverlap(
+        agentsWithWorktrees.map(a => ({
+          agentName: a.name,
+          branch: a.worktreeBranch!,
+        })),
+        basePath,
+      )
+      if (overlapDetected) {
+        for (const a of overlapDetected.agents) overlapSkippedAgents.add(a)
+        const filesPreview = overlapDetected.files.slice(0, 10)
+        const filesMore = overlapDetected.files.length > 10
+          ? `\n  … (${overlapDetected.files.length - 10} more)`
+          : ''
+        const recoveryLines = overlapDetected.agents.map(name => {
+          const a = agentsWithWorktrees.find(x => x.name === name)
+          return `  - ${name}:  git diff $(git merge-base HEAD ${a?.worktreeBranch}) ${a?.worktreeBranch}`
+        }).join('\n')
+        appendMessage(teamId, {
+          id: uuidv4(), teamId, from: 'ensemble', to: 'team',
+          content: [
+            `⚠️ Cross-agent file overlap detected — auto-merge SKIPPED for ${overlapDetected.agents.length} agent(s).`,
+            ``,
+            `Files touched by 2+ agents (revert/overwrite risk):`,
+            ...filesPreview.map(f => `  - ${f}`),
+            filesMore,
+            ``,
+            `Branches preserved for operator review:`,
+            recoveryLines,
+            ``,
+            `Pick whichever agent's work to keep, OR cherry-pick selectively across them.`,
+            `Why: a clean sequential merge would silently overwrite prior agents' work — most`,
+            `commonly when one agent reverts what others added. Git can't tell that apart from`,
+            `"valid forward work" because reverts apply without conflict.`,
+          ].filter(Boolean).join('\n'),
+          type: 'chat', timestamp: new Date().toISOString(),
+          meta: {
+            event: 'cross_agent_overlap',
+            files: overlapDetected.files,
+            agents: overlapDetected.agents,
+            fileToAgents: overlapDetected.fileToAgents,
+          },
+        })
+        // W4 auto-learn: persist a failure-pattern so the next team in
+        // the same project gets pre-flight warned about overlap-prone
+        // files. Fire-and-forget — never block disband on memory write.
+        try {
+          const { recordFailureLearning } = await import('../lib/auto-learn')
+          recordFailureLearning({
+            teamId,
+            project: team.workingDirectory ? path.basename(team.workingDirectory) : undefined,
+            gateId: 'cross-agent-overlap',
+            errorSignature: `Files: ${overlapDetected.files.slice(0, 5).join(', ')}. Agents: ${overlapDetected.agents.join(', ')}.`,
+            blockers: overlapDetected.files.slice(0, 6),
+            iterationsTried: 0,
+          })
+        } catch (err) {
+          console.warn(`[auto-learn] cross-agent-overlap pattern write failed: ${(err as Error).message}`)
+        }
+      }
+    }
     if (completionConfirmed) {
       for (const agent of agentsWithWorktrees) {
+        if (overlapSkippedAgents.has(agent.name)) continue  // preserved above
         const worktreeInfo: WorktreeInfo = {
           path: agent.worktreePath!,
           branch: agent.worktreeBranch!,
@@ -2522,6 +2599,18 @@ export async function disbandTeam(
         path: agent.worktreePath!,
         branch: agent.worktreeBranch!,
         agentName: agent.name,
+      }
+      // W4: overlap-skipped agents force-preserve. The evaluator would
+      // otherwise see "clean state, commits not in default branch" and
+      // route them to commits-not-merged preserve — same outcome — but
+      // we want the audit trail to say "merge-conflict" semantically
+      // since the operator's mental model is "these branches conflict
+      // with each other, not just with master."
+      if (overlapSkippedAgents.has(agent.name)) {
+        dispositions.set(agent.name, { action: 'preserve', why: 'merge-conflict', detail: 'cross-agent overlap' })
+        conflictedAgents.add(agent.name)
+        console.warn(`[Ensemble] Preserved (cross-agent-overlap): ${agent.name}`)
+        continue
       }
       const disposition = await evaluateWorktreeDisposition({
         worktreePath: worktreeInfo.path,

@@ -67,6 +67,90 @@ export async function createWorktree(
 }
 
 /**
+ * W4: detect cross-agent file-overlap BEFORE merge.
+ *
+ * Production case (2026-05-04): premium-quad on R35 task. Four agents,
+ * three of them (claude-1, sonnet-2, codex-3) added new code; codex-4
+ * committed REVERTS of W1/W2/W3 work in their own worktree. When the
+ * disband path sequentially merged each branch:
+ *
+ *   git merge collab/<id>/claude-1   ← OK
+ *   git merge collab/<id>/sonnet-2   ← OK (different lines, no conflict)
+ *   git merge collab/<id>/codex-3    ← OK
+ *   git merge collab/<id>/codex-4    ← revert applies cleanly, undoes 3 above
+ *
+ * Reverts are designed to apply on top of the original change without
+ * conflict — git has no way to tell them apart from "valid forward work."
+ * Result: claude-1 + sonnet-2 work silently disappeared from master.
+ * Operator had to manually cherry-pick from individual branches.
+ *
+ * The fix: any time 2+ agents touched the SAME FILE, halt auto-merge for
+ * those agents and preserve their branches for operator review. Agents
+ * that touched non-overlapping files merge normally.
+ *
+ * This catches THREE failure modes with one primitive:
+ *   - non-conflicting overwrite (same file, different lines, last-write-wins)
+ *   - revert stomping (reverts apply cleanly, undo prior merges)
+ *   - subtle semantic conflicts that git's text-merger doesn't see
+ */
+export interface CrossAgentOverlap {
+  files: string[]                           // files touched by 2+ agents
+  agents: string[]                          // agents involved in the overlap
+  perAgentChanges: Record<string, string[]> // per-agent full file list
+  fileToAgents: Record<string, string[]>    // who touched what
+}
+
+export async function detectCrossAgentOverlap(
+  agentBranches: Array<{ agentName: string; branch: string }>,
+  basePath: string,
+  defaultBranch?: string,
+): Promise<CrossAgentOverlap | null> {
+  if (agentBranches.length < 2) return null
+  const baseRef = defaultBranch ?? (await resolveDefaultBranchRef(basePath)) ?? 'HEAD'
+
+  const perAgent: Record<string, string[]> = {}
+  for (const { agentName, branch } of agentBranches) {
+    try {
+      const { stdout } = await execFileAsync(
+        'git', ['diff', '--name-only', `${baseRef}...${branch}`],
+        { cwd: basePath },
+      )
+      perAgent[agentName] = stdout.trim().split('\n').filter(Boolean)
+    } catch {
+      perAgent[agentName] = []
+    }
+  }
+
+  // Invert: file → agents who touched it.
+  const fileToAgents: Record<string, string[]> = {}
+  for (const [agent, files] of Object.entries(perAgent)) {
+    for (const f of files) {
+      if (!fileToAgents[f]) fileToAgents[f] = []
+      fileToAgents[f].push(agent)
+    }
+  }
+
+  // Files touched by 2+ agents.
+  const overlapFiles = Object.entries(fileToAgents)
+    .filter(([, agents]) => agents.length >= 2)
+    .map(([f]) => f)
+    .sort()
+  if (overlapFiles.length === 0) return null
+
+  const overlapAgents = new Set<string>()
+  for (const f of overlapFiles) {
+    for (const a of fileToAgents[f]) overlapAgents.add(a)
+  }
+
+  return {
+    files: overlapFiles,
+    agents: [...overlapAgents].sort(),
+    perAgentChanges: perAgent,
+    fileToAgents,
+  }
+}
+
+/**
  * Merge changes from a worktree branch back to the target branch.
  * Uses --no-ff to preserve the merge commit for traceability.
  * Returns true if merge succeeded, false if there were conflicts.
