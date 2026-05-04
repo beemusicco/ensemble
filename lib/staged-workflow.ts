@@ -13,7 +13,8 @@ import { postRemoteSessionCommand } from './agent-spawner'
 import { loadBulletproofConfig } from './bulletproof-config'
 import { runVerifyChecks, formatVerifySummary, type VerifyRunSummary } from './verify-runner'
 import { scanCitations, findConfabulations, formatConfabulationWarning, buildSearchIndex } from './confabulation-guard'
-import { recordFailureLearning, recordConfabLearning } from './auto-learn'
+import { recordFailureLearning, recordConfabLearning, classifyError } from './auto-learn'
+import { queryMemoriesSemantic } from './memory-store'
 import fs from 'fs'
 import path from 'path'
 
@@ -344,12 +345,63 @@ export class StagedWorkflowManager {
         if (stillNoGo.length > 0) reasons.push(`agent NO-GO from ${[...new Set(stillNoGo.map(m => m.from))].join(', ')}`)
         if (stillMechFail) reasons.push(`mechanical gate FAIL (${verifyRunSummary!.failed} fail / ${verifyRunSummary!.errored} error)`)
         if (confabulationCount > 0) reasons.push(`${confabulationCount} confabulation warning(s)`)
+        // W6 auto-rescue: BEFORE posting "standing by for human", query
+        // memory for past failure-patterns matching this gate+error class.
+        // If a prior team hit the same failure and we have a recorded
+        // resolution or pattern context, inject it into the team feed so
+        // the team has a concrete next-step instead of waiting for an
+        // operator who isn't coming. This converts dead-letter teams
+        // (17/week pre-W4) into self-recovering ones.
+        let rescueText: string | null = null
+        if (stillMechFail && verifyRunSummary) {
+          try {
+            const failedChecks = verifyRunSummary.results.filter(r => r.status === 'fail' || r.status === 'error')
+            const teamWithCwd = this.options.team as EnsembleTeam & { workingDirectory?: string }
+            const project = this.detectProjectTag(teamWithCwd.workingDirectory)
+            const rescueLines: string[] = []
+            for (const check of failedChecks.slice(0, 3)) {
+              const errClass = classifyError(check.output)
+              // Query failure-pattern + resolution memories that match this
+              // gate AND/OR this error class. Project filter narrows to
+              // same-codebase prior teams. Top-3 most relevant by semantic
+              // similarity on the actual error text.
+              const queryText = `${check.id} ${errClass} ${check.output.slice(0, 300)}`
+              const matches = queryMemoriesSemantic(queryText, {
+                scope: 'global',
+                tags: ['failure-pattern', 'resolution', `gate:${check.id.replace(/[^a-z0-9-]/gi, '_').slice(0, 60)}`, `error:${errClass}`],
+                pool: 200,
+                limit: 3,
+              })
+              const projectMatches = project
+                ? matches.filter(m => m.tags.includes(project))
+                : matches
+              const finalMatches = projectMatches.length > 0 ? projectMatches : matches
+              for (const m of finalMatches.slice(0, 2)) {
+                rescueLines.push(`  • ${m.key}: ${m.value.slice(0, 200).replace(/\n/g, ' ')}`)
+              }
+            }
+            if (rescueLines.length > 0) {
+              rescueText = [
+                `🚀 Auto-rescue: prior teams hit similar failures. Try these BEFORE asking operator:`,
+                ...rescueLines,
+                ``,
+                `If a prior fix applies to your situation, try it. If you confirm a fix worked,`,
+                `share it via team-say so the next team can find it too.`,
+              ].join('\n')
+            }
+          } catch (err) {
+            console.warn(`[auto-rescue] memory query failed: ${(err as Error).message}`)
+          }
+        }
+
         appendMessage(this.options.team.id, {
           id: uuidv4(),
           teamId: this.options.team.id,
           from: 'ensemble',
           to: 'team',
-          content: `🚧 Auto-fix budget exhausted after ${this.config.maxFixIterations} iteration(s) — ${reasons.join('; ')}. Team standing by for human direction or signal-complete.`,
+          content: rescueText
+            ? `🚧 Auto-fix budget exhausted after ${this.config.maxFixIterations} iteration(s) — ${reasons.join('; ')}.\n\n${rescueText}\n\nIf the rescue suggestions above don't apply, then signal-complete to escalate.`
+            : `🚧 Auto-fix budget exhausted after ${this.config.maxFixIterations} iteration(s) — ${reasons.join('; ')}. Team standing by for human direction or signal-complete.`,
           type: 'chat',
           timestamp: this.now().toISOString(),
           meta: {
@@ -358,6 +410,7 @@ export class StagedWorkflowManager {
             noGoSenders: [...new Set(stillNoGo.map(m => m.from))],
             mechanicalFail: stillMechFail,
             confabulationCount,
+            autoRescueOffered: rescueText !== null,
           },
         })
 

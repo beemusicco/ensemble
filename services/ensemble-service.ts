@@ -27,6 +27,7 @@ import {
 } from '../lib/collab-paths'
 import { queryMemories, queryMemoriesSemantic, writeMemory } from '../lib/memory-store'
 import { TAG as LEARN_TAG, weightLearning } from '../lib/auto-learn'
+import * as cognee from '../lib/cognee-bridge'
 import { readProjectConfigText } from '../lib/project-config'
 import { scanAndAnswerUnknowns, flagAssumptions } from '../lib/unknown-watcher'
 import { scanAndDispatchQuestions, answerQuestion, type AnswerInput, type AnswerResult } from '../lib/question-watcher'
@@ -1846,6 +1847,31 @@ async function createEnsembleTeamInner(
   const team = createTeam(request)
   const cwd = request.workingDirectory || process.cwd()
   const worktreeMap = new Map<string, WorktreeInfo>()
+
+  // W6: Cognee KG enrichment, posted as a team-feed message (NOT inlined
+  // into the system prompt — buildPromptPreview is sync). Fire-and-forget;
+  // if Cognee is down or disabled (default), nothing happens.
+  if (cognee.isEnabled()) {
+    const project = currentProjectFromCwd(cwd)
+    cognee.searchGraph(
+      `${team.description} ${project ?? ''}`.slice(0, 800),
+      { limit: 5, tags: project ? [project] : [] },
+    ).then(entries => {
+      if (entries.length === 0) return
+      const lines = entries.map(e => `  - ${e.id}: ${e.text.slice(0, 220)}`).join('\n')
+      appendMessage(team.id, {
+        id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
+        content: [
+          `🌐 KNOWLEDGE GRAPH (Cognee, cross-project structural patterns):`,
+          lines,
+          ``,
+          `Apply these where they map onto your task. Cite the KG node id if you use one.`,
+        ].join('\n'),
+        type: 'chat', timestamp: new Date().toISOString(),
+        meta: { event: 'kg_enrichment', count: entries.length, ids: entries.map(e => e.id) },
+      })
+    }).catch(() => { /* graceful degrade */ })
+  }
 
   // Auto-enable worktrees in three cases:
   //   1. Caller explicitly asked (request.useWorktrees=true)

@@ -266,6 +266,177 @@ function applyEvent(c: RawCounters, event: string | undefined, m: EnsembleMessag
 }
 
 /**
+ * W6: calibration-driven role assignment with anti-fragile guards.
+ *
+ * Reads existing per-program metrics and, for a given team's task, suggests
+ * which PROGRAM (claude / codex / sonnet / haiku) is best suited to which
+ * ROLE (architect / builder / verifier). Three guards prevent self-
+ * reinforcing loops where the worst agent never gets a chance to improve:
+ *
+ *   1. min_samples=20 floor — programs with <20 sampled teams aren't
+ *      ranked. They appear in the assignment pool unweighted, so new
+ *      agents get exposure on equal footing with veterans.
+ *
+ *   2. epsilon-greedy randomization (default 10%) — even after ranking,
+ *      one assignment in N is randomized so calibration data keeps
+ *      flowing for low-rank programs. Without this, the worst-cleanliness
+ *      program would be permanently demoted.
+ *
+ *   3. Operator override always wins — when CreateTeamRequest.agents
+ *      includes explicit role assignments, this function is skipped.
+ *
+ * ENV gate: ENSEMBLE_CALIBRATION_ROLE_ASSIGN=1 enables the suggestion.
+ * Default OFF — the existing template-driven role assignment stays
+ * authoritative until production data shows this is actually better.
+ */
+export interface RoleAssignmentInput {
+  /** Programs available on the team (e.g. ['claude','codex','haiku']) */
+  programs: string[]
+  /** Roles needed (e.g. ['architect','builder','verifier']) — order matters: index 0 → highest priority match */
+  roles: string[]
+  /** Pre-computed calibration summary (caller computes once per team-create) */
+  calibration: CalibrationSummary
+  /** Min teams sampled for a program to be ranked. Default 20. */
+  minSamples?: number
+  /** Probability of randomization per assignment (0..1). Default 0.10. */
+  epsilon?: number
+  /** Optional RNG for deterministic tests. */
+  rng?: () => number
+}
+
+export interface RoleAssignment {
+  program: string
+  role: string
+  reason: string                  // human-readable explanation
+  randomized: boolean             // true if epsilon-greedy fired
+}
+
+interface RoleScoringRule {
+  /** Higher score = better fit */
+  score: (m: AgentMetrics) => number
+  rationale: string
+}
+
+const ROLE_SCORING: Record<string, RoleScoringRule> = {
+  // Architect role — prefers high assumption accuracy (agent thinks
+  // before claiming) and low confab count (cites real things).
+  architect: {
+    score: m => {
+      const a = m.assumptionAccuracy >= 0 ? m.assumptionAccuracy : 0.5
+      const c = m.cleanlinessScore >= 0 ? m.cleanlinessScore : 0.5
+      return 0.6 * a + 0.4 * c
+    },
+    rationale: 'high assumption accuracy + cleanliness',
+  },
+  // Builder role — prefers prolific output (more messages = more work)
+  // BUT not at the cost of cleanliness.
+  builder: {
+    score: m => {
+      const c = m.cleanlinessScore >= 0 ? m.cleanlinessScore : 0.5
+      const productivity = Math.min(1, m.totalMessages / 1000)  // cap at 1k msgs
+      return 0.5 * c + 0.5 * productivity
+    },
+    rationale: 'productive output paired with cleanliness',
+  },
+  // Verifier role — prefers MAX cleanliness; verifiers must NOT introduce
+  // new errors. Confabs in a verifier are catastrophic.
+  verifier: {
+    score: m => {
+      return m.cleanlinessScore >= 0 ? m.cleanlinessScore : 0.5
+    },
+    rationale: 'highest cleanliness (verifier mistakes are catastrophic)',
+  },
+  // Generic fallback for unknown roles — balanced score.
+  '__default__': {
+    score: m => {
+      const a = m.assumptionAccuracy >= 0 ? m.assumptionAccuracy : 0.5
+      const c = m.cleanlinessScore >= 0 ? m.cleanlinessScore : 0.5
+      return 0.5 * a + 0.5 * c
+    },
+    rationale: 'balanced calibration',
+  },
+}
+
+export function recommendRoleAssignments(input: RoleAssignmentInput): RoleAssignment[] {
+  const minSamples = input.minSamples ?? 20
+  const epsilon = input.epsilon ?? 0.10
+  const rng = input.rng ?? Math.random
+
+  // Map program → metrics. Skip programs below min_samples for ranking
+  // purposes (but they remain in the pool — they get assigned at random
+  // when no ranked candidates remain).
+  const programMetrics = new Map<string, AgentMetrics>()
+  for (const m of input.calibration.perProgram) {
+    if (m.program) programMetrics.set(m.program, m)
+  }
+
+  const rankedPool: string[] = []
+  const newPool: string[] = []  // below min_samples
+  for (const program of input.programs) {
+    const m = programMetrics.get(program)
+    if (!m || m.teamCount < minSamples) {
+      newPool.push(program)
+    } else {
+      rankedPool.push(program)
+    }
+  }
+
+  const assignments: RoleAssignment[] = []
+  const usedPrograms = new Set<string>()
+
+  // Sort each role's candidates by score, pick top unused. Apply epsilon-
+  // greedy: with probability epsilon, swap the picked top with a random
+  // other-pool candidate. This keeps low-rank programs in the rotation
+  // so we never lock into "haiku is the verifier forever, claude never
+  // verifies".
+  for (const role of input.roles) {
+    const rule = ROLE_SCORING[role.toLowerCase()] ?? ROLE_SCORING.__default__
+    const available = [...rankedPool, ...newPool].filter(p => !usedPrograms.has(p))
+    if (available.length === 0) break
+
+    let picked: string
+    let randomized = false
+    let reason: string
+
+    if (rng() < epsilon && available.length > 1) {
+      // Randomize for exploration.
+      picked = available[Math.floor(rng() * available.length)]
+      randomized = true
+      reason = `epsilon-greedy randomization (${(epsilon * 100).toFixed(0)}% explore rate) — keeps calibration data flowing for all programs`
+    } else {
+      // Score-pick. Programs in newPool (below min_samples) get a NEUTRAL
+      // baseline score 0.5 — we don't trust their metrics yet (could be
+      // lucky or unlucky on small N). Programs in rankedPool get their
+      // actual score. This means a ranked-pool program with score >= 0.5
+      // wins over any newPool program; only when ranked candidates score
+      // worse than baseline does a newPool one get the role. Eliminates
+      // the "lucky 5-team sonnet beats 100-team claude" failure mode.
+      const scored = available
+        .map(p => {
+          const m = programMetrics.get(p)
+          const isRanked = !!m && m.teamCount >= minSamples
+          const score = isRanked ? rule.score(m!) : 0.5  // newPool gets baseline
+          return { program: p, score, hasData: isRanked }
+        })
+        .sort((a, b) => b.score - a.score)
+      picked = scored[0].program
+      const winnerMetrics = programMetrics.get(picked)
+      const winnerScore = winnerMetrics && scored[0].hasData
+        ? rule.score(winnerMetrics).toFixed(3)
+        : '0.500 (baseline)'
+      reason = scored[0].hasData
+        ? `${rule.rationale}: ${picked} scored ${winnerScore} (${winnerMetrics?.teamCount ?? 0} sampled teams)`
+        : `${rule.rationale}: ${picked} chosen by default — below min_samples=${minSamples} threshold, ranking inconclusive`
+    }
+
+    usedPrograms.add(picked)
+    assignments.push({ program: picked, role, reason, randomized })
+  }
+
+  return assignments
+}
+
+/**
  * Compact human-readable summary suitable for `team-stats` shell output.
  */
 export function formatCalibrationText(summary: CalibrationSummary): string {

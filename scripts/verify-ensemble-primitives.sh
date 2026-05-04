@@ -124,6 +124,26 @@ check "alien:converger-deploys-second-order" "grep -q 'SECOND-ORDER' $ROOT/colla
 check "alien:converger-deploys-10x-test" "grep -q '10X TEST' $ROOT/collab-templates.json"
 check "alien:keyword-invent" "grep -q 'invent' $ROOT/scripts/collab-launch.sh"
 check "alien:keyword-iznajdi" "grep -q 'iznajd' $ROOT/scripts/collab-launch.sh"
+check "alien:priority-before-quad" "awk \"/printf 'alien-thinking'/{a=NR} /printf 'premium-quad'/{q=NR} END{exit (a<q && a>0) ? 0 : 1}\" $ROOT/scripts/collab-launch.sh"
+
+# ── Primitive 10: auto-rescue (W6) ────────────────────────────────────
+check "rescue:queries-memory-on-exhausted" "grep -q 'queryMemoriesSemantic' $ROOT/lib/staged-workflow.ts"
+check "rescue:emits-rescue-text" "grep -q 'Auto-rescue' $ROOT/lib/staged-workflow.ts"
+check "rescue:meta-flag-set" "grep -q 'autoRescueOffered' $ROOT/lib/staged-workflow.ts"
+
+# ── Primitive 11: calibration → role assignment (W6) ──────────────────
+check "role:fn-exported" "grep -q 'export function recommendRoleAssignments' $ROOT/lib/calibration.ts"
+check "role:has-min-samples-guard" "grep -q 'minSamples' $ROOT/lib/calibration.ts"
+check "role:has-epsilon-greedy" "grep -q 'epsilon' $ROOT/lib/calibration.ts"
+check "role:role-scoring-rules" "grep -q 'ROLE_SCORING' $ROOT/lib/calibration.ts"
+check "role:tests-exist" "test -f $ROOT/tests/role-assignment.test.ts"
+
+# ── Primitive 12: Cognee KG bridge (W6) ───────────────────────────────
+check "cognee:module-exists" "test -f $ROOT/lib/cognee-bridge.ts"
+check "cognee:env-gated" "grep -q 'ENSEMBLE_USE_KG' $ROOT/lib/cognee-bridge.ts"
+check "cognee:graceful-degrade" "grep -q 'fetchWithTimeout' $ROOT/lib/cognee-bridge.ts"
+check "cognee:wired-in-spawn" "grep -q 'cognee.searchGraph' $ROOT/services/ensemble-service.ts"
+check "cognee:tests-exist" "test -f $ROOT/tests/cognee-bridge.test.ts"
 
 # ── Output ────────────────────────────────────────────────────────────
 total=$(( ${#ok[@]} + ${#failures[@]} ))
