@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Weekly memory GC — APPLY mode by default.
+
+  Walks ~/.ensemble/memory.db and deletes rows whose tags + age violate
+  the retention policy declared in lib/memory-gc.ts:DEFAULT_RETENTION_RULES
+  (or the operator's override at ~/.ensemble/memory-retention.json).
+
+  Conservative defaults: resolutions never expire, failures 1y, confabs
+  6m, reflections 3m, backfill 3m. Apply-mode is safe because no rule
+  is shorter than 90 days — the GC only kicks in after the store has had
+  time to accumulate aged data.
+
+  Schedule: every Sunday at 03:00 local time. Order vs other Sunday cron:
+    03:00 — memory-gc          (this; prunes stale rows)
+    04:00 — memory-consolidate (rolls up active rows; should NOT see what
+                                we just pruned, hence the 1h gap)
+    04:30 — worktree-gc        (orthogonal; cleans up disk, not memory)
+
+  Install:
+    sed "s|HOME_PLACEHOLDER|$HOME|g" launchd/co.openclaw.ensemble-memory-gc.plist.template > ~/Library/LaunchAgents/co.openclaw.ensemble-memory-gc.plist
+    launchctl load ~/Library/LaunchAgents/co.openclaw.ensemble-memory-gc.plist
+
+  Override retention via ~/.ensemble/memory-retention.json (JSON array of
+  { tagPattern, retentionDays, reason } entries — see lib/memory-gc.ts
+  for the schema and DEFAULT_RETENTION_RULES for the format example).
+
+  Why this exists: post-W4/W6/W7 every collab writes 5-15 memories. At 30-50
+  collabs/week that's 200-700 new rows/week. queryMemoriesSemantic does
+  in-memory Jaccard scoring — fine at 1k rows, slow at 5k+, painful at 20k+.
+  Without GC the store crosses 5k in ~3 months and 20k in ~12 months.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>co.openclaw.ensemble-memory-gc</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/npx</string>
+        <string>tsx</string>
+        <string>HOME_PLACEHOLDER/.openclaw/tools/ensemble/scripts/memory-gc.ts</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>HOME_PLACEHOLDER/.openclaw/tools/ensemble</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>HOME_PLACEHOLDER/logs/ensemble-memory-gc.log</string>
+    <key>StandardErrorPath</key>
+    <string>HOME_PLACEHOLDER/logs/ensemble-memory-gc.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>HOME_PLACEHOLDER</string>
+    </dict>
+</dict>
+</plist>

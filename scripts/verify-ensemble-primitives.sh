@@ -160,6 +160,21 @@ check "role-wired:env-opt-out" "grep -q 'ENSEMBLE_CALIBRATION_ROLE_ASSIGN' $ROOT
 check "role-wired:emits-feed-msg" "grep -q 'calibration_role_assignment' $ROOT/services/ensemble-service.ts"
 check "role-wired:tests-exist" "test -f $ROOT/tests/w7-integration.test.ts"
 
+# ── Primitive 15: Cognee auth (W7.1) ──────────────────────────────────
+check "cognee-auth:fetchAuthToken-exists" "grep -q 'fetchAuthToken' $ROOT/lib/cognee-bridge.ts"
+check "cognee-auth:env-credentials" "grep -q 'ENSEMBLE_KG_USER' $ROOT/lib/cognee-bridge.ts && grep -q 'ENSEMBLE_KG_PASS' $ROOT/lib/cognee-bridge.ts"
+check "cognee-auth:401-retry" "grep -q '401' $ROOT/lib/cognee-bridge.ts"
+check "cognee-auth:bearer-header" "grep -q 'Bearer' $ROOT/lib/cognee-bridge.ts"
+
+# ── Primitive 16: memory GC primitive (W7.1) ──────────────────────────
+check "memory-gc:module-exists" "test -f $ROOT/lib/memory-gc.ts"
+check "memory-gc:declarative-rules" "grep -q 'DEFAULT_RETENTION_RULES' $ROOT/lib/memory-gc.ts"
+check "memory-gc:resolution-forever" "grep -q \"tagPattern: 'resolution'\" $ROOT/lib/memory-gc.ts"
+check "memory-gc:override-file-support" "grep -q 'memory-retention.json' $ROOT/lib/memory-gc.ts"
+check "memory-gc:script-runnable" "test -x $ROOT/scripts/memory-gc.ts"
+check "memory-gc:cron-plist" "test -f $ROOT/launchd/co.openclaw.ensemble-memory-gc.plist.template"
+check "memory-gc:tests-exist" "test -f $ROOT/tests/memory-gc.test.ts"
+
 # ── Output ────────────────────────────────────────────────────────────
 total=$(( ${#ok[@]} + ${#failures[@]} ))
 if [ "$JSON" = "1" ]; then

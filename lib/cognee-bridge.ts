@@ -23,6 +23,49 @@
 
 const DEFAULT_BASE = process.env['ENSEMBLE_KG_URL'] || 'http://127.0.0.1:8000'
 const DEFAULT_TIMEOUT_MS = parseInt(process.env['ENSEMBLE_KG_TIMEOUT_MS'] || '2000', 10) || 2000
+const KG_USER = process.env['ENSEMBLE_KG_USER']
+const KG_PASS = process.env['ENSEMBLE_KG_PASS']
+
+// Bearer token cache. Cognee tokens typically last 60min; we refresh on
+// 401 OR after CACHE_MS, whichever comes first. Keeps the working set
+// "log in once, reuse for the duration of a typical disband" but never
+// holds onto a stale token.
+const TOKEN_CACHE_MS = 50 * 60 * 1000
+let cachedToken: { value: string; until: number } | null = null
+
+async function fetchAuthToken(): Promise<string | null> {
+  if (!KG_USER || !KG_PASS) return null
+  if (cachedToken && cachedToken.until > Date.now()) return cachedToken.value
+  const res = await fetchWithTimeout(
+    `${DEFAULT_BASE}/api/v1/auth/login`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: KG_USER, password: KG_PASS }),
+    },
+    DEFAULT_TIMEOUT_MS,
+  )
+  if (!res || !res.ok) {
+    cachedToken = null
+    return null
+  }
+  try {
+    const data = (await res.json()) as { access_token?: string; token?: string }
+    const token = data.access_token ?? data.token ?? null
+    if (token) {
+      cachedToken = { value: token, until: Date.now() + TOKEN_CACHE_MS }
+      return token
+    }
+  } catch { /* fallthrough */ }
+  return null
+}
+
+async function authedHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const token = await fetchAuthToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  return headers
+}
 
 export interface KGSearchResult {
   /** Concept / node identifier in the graph */
@@ -81,15 +124,14 @@ export async function searchGraph(
     ...(opts.tags?.length ? { tags: opts.tags } : {}),
   })
 
-  const res = await fetchWithTimeout(
-    url,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-    },
-    DEFAULT_TIMEOUT_MS,
-  )
+  const headers = await authedHeaders()
+  let res = await fetchWithTimeout(url, { method: 'POST', headers, body }, DEFAULT_TIMEOUT_MS)
+  if (res && res.status === 401) {
+    // Token may be stale — invalidate cache and retry once.
+    cachedToken = null
+    const refreshed = await authedHeaders()
+    res = await fetchWithTimeout(url, { method: 'POST', headers: refreshed, body }, DEFAULT_TIMEOUT_MS)
+  }
   if (!res || !res.ok) return []
 
   try {
@@ -132,15 +174,13 @@ export async function addKnowledge(input: KGAddInput): Promise<boolean> {
     tags: input.tags ?? [],
     scope: input.scope,
   })
-  const res = await fetchWithTimeout(
-    url,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-    },
-    DEFAULT_TIMEOUT_MS,
-  )
+  const headers = await authedHeaders()
+  let res = await fetchWithTimeout(url, { method: 'POST', headers, body }, DEFAULT_TIMEOUT_MS)
+  if (res && res.status === 401) {
+    cachedToken = null
+    const refreshed = await authedHeaders()
+    res = await fetchWithTimeout(url, { method: 'POST', headers: refreshed, body }, DEFAULT_TIMEOUT_MS)
+  }
   return !!res && res.ok
 }
 
