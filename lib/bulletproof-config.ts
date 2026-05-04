@@ -32,7 +32,18 @@
 
 import fs from 'fs'
 import path from 'path'
+import url from 'url'
 import { findProjectConfigPath } from './project-config'
+
+// Absolute path to scripts/pytest-diff.sh — resolved at module-load time so
+// it works regardless of the team's workingDirectory. Compute relative to
+// this file so a relocation of the ensemble tool dir does not break it.
+const HOME_REL_PYTEST_DIFF = path.resolve(
+  path.dirname(url.fileURLToPath(import.meta.url)),
+  '..',
+  'scripts',
+  'pytest-diff.sh',
+)
 
 /**
  * Tiny gitignore-style glob matcher. Handles double-star (any depth), single-star
@@ -210,11 +221,20 @@ function detectInDir(absDir: string, prefix: string, checks: BulletproofCheck[])
   // Python: pytest if pyproject.toml / pytest.ini / conftest.py.
   // (Don't trigger on `tests/` directory alone — Node/Rust/Go projects
   // also use `tests/`, would false-positive pytest on them.)
+  //
+  // W2.5l: diff-scope pytest. 7-day production data showed pytest as the
+  // #1 verify-runner failure (41 hits vs 14 ruff / 7 vitest) because the
+  // full suite hits pre-existing master debt — same lesson as W2.5j (vitest)
+  // and the original ruff diff-scope. Logic lives in scripts/pytest-diff.sh
+  // (testable, readable, no inline-bash-quoting hell). Falls back to
+  // --collect-only smoke when no targets resolve.
   if (exists('pyproject.toml') || exists('pytest.ini') || exists('conftest.py')) {
     checks.push({
-      id: `pytest${idSuffix}`,
+      id: `pytest-diff${idSuffix}`,
       type: 'cmd',
-      cmd: `${cdPrefix}pytest -q --no-header -x --maxfail=3 -m 'not e2e and not slow'`,
+      // Path is fixed relative to the ensemble tool dir — every team's
+      // workingDirectory is a project repo, but the script is a tool.
+      cmd: `${cdPrefix}bash ${HOME_REL_PYTEST_DIFF}`,
       timeoutMs: 240_000,
     })
   }

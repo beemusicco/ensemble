@@ -23,12 +23,14 @@ describe('bulletproof-config', () => {
     expect(cfg.source).toBe('empty')
   })
 
-  it('auto-detects pytest when pyproject.toml exists', () => {
+  it('auto-detects pytest-diff when pyproject.toml exists (W2.5l: diff-scoped)', () => {
     fs.writeFileSync(path.join(tmpDir, 'pyproject.toml'), '[project]\n')
     const cfg = loadBulletproofConfig(tmpDir)
     expect(cfg.source).toBe('auto-detected')
-    expect(cfg.always.find(c => c.id === 'pytest')).toBeDefined()
-    expect(cfg.always.find(c => c.id === 'pytest')?.cmd).toMatch(/pytest/)
+    const pytest = cfg.always.find(c => c.id === 'pytest-diff')
+    expect(pytest).toBeDefined()
+    // Calls the diff-scoped runner script, not full `pytest -q`
+    expect(pytest!.cmd).toMatch(/pytest-diff\.sh/)
   })
 
   it('auto-detects npm test when package.json has a test script (non-vitest)', () => {
@@ -115,10 +117,10 @@ describe('bulletproof-config', () => {
     fs.writeFileSync(path.join(tmpDir, 'backend/pyproject.toml'), '[project]\n')
     const cfg = loadBulletproofConfig(tmpDir)
     expect(cfg.source).toBe('auto-detected')
-    const pytest = cfg.always.find(c => c.id === 'pytest-backend')
+    const pytest = cfg.always.find(c => c.id === 'pytest-diff-backend')
     expect(pytest).toBeDefined()
     expect(pytest!.cmd).toMatch(/cd backend &&/)
-    expect(pytest!.cmd).toMatch(/not e2e and not slow/)
+    expect(pytest!.cmd).toMatch(/pytest-diff\.sh/)
   })
 
   it('detects vitest-changed in subproject (frontend/) for monorepo layouts (W2.5j)', () => {
@@ -165,9 +167,9 @@ describe('bulletproof-config', () => {
     }))
     const cfg = loadBulletproofConfig(tmpDir)
     const ids = cfg.always.map(c => c.id)
-    expect(ids).toContain('pytest-backend')
+    expect(ids).toContain('pytest-diff-backend')         // W2.5l: diff-scoped
     expect(ids).toContain('ruff-diff-backend')
-    expect(ids).toContain('vitest-changed-frontend')  // W2.5j: diff-scoped
+    expect(ids).toContain('vitest-changed-frontend')     // W2.5j: diff-scoped
     expect(ids).toContain('lint-frontend')
   })
 
@@ -199,7 +201,7 @@ describe('bulletproof-config', () => {
     fs.writeFileSync(path.join(tmpDir, 'pyproject.toml'), '[project]\n')
     const cfg = loadBulletproofConfig(tmpDir)
     expect(cfg.source).toBe('auto-detected')
-    // Root-level check has no subdir suffix
-    expect(cfg.always.find(c => c.id === 'pytest')).toBeDefined()
+    // Root-level check has no subdir suffix; pytest-diff (W2.5l) is the new id
+    expect(cfg.always.find(c => c.id === 'pytest-diff')).toBeDefined()
   })
 })

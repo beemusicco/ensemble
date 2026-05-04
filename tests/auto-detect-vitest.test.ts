@@ -56,6 +56,6 @@ describe('auto-detect: vitest diff-scoped', () => {
     const cfg = loadBulletproofConfig(tmpDir)
     expect(cfg.always.find(c => c.id === 'vitest-changed-frontend')).toBeDefined()
     expect(cfg.always.find(c => c.id === 'vitest-changed-frontend')?.cmd).toMatch(/cd frontend &&/)
-    expect(cfg.always.find(c => c.id === 'pytest-backend')).toBeDefined()
+    expect(cfg.always.find(c => c.id === 'pytest-diff-backend')).toBeDefined()
   })
 })
