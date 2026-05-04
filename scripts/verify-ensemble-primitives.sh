@@ -71,6 +71,26 @@ check "question:cost-warning-in-prompt" "grep -q '\\[QUESTION\\] is COSTLY' $ROO
 check "question:do-not-use-block" "grep -q 'DO NOT use \\[QUESTION\\]' $ROOT/services/ensemble-service.ts"
 check "question:silence-not-greenlight" "grep -q \"operator.s silence is not a green light\" $ROOT/services/ensemble-service.ts"
 
+# ── Primitive 4: auto-learn (self-upgrading learning loop) ────────────
+check "auto-learn:module-exists" "test -f $ROOT/lib/auto-learn.ts"
+check "auto-learn:exports-record-failure" "grep -q 'export function recordFailureLearning' $ROOT/lib/auto-learn.ts"
+check "auto-learn:exports-record-confab" "grep -q 'export function recordConfabLearning' $ROOT/lib/auto-learn.ts"
+check "auto-learn:exports-weight" "grep -q 'export function weightLearning' $ROOT/lib/auto-learn.ts"
+check "auto-learn:tag-constants" "grep -q 'FAILURE_PATTERN' $ROOT/lib/auto-learn.ts && grep -q 'CONFAB_PATTERN' $ROOT/lib/auto-learn.ts"
+check "auto-learn:wired-failure-hook" "grep -q 'recordFailureLearning(' $ROOT/lib/staged-workflow.ts"
+check "auto-learn:wired-confab-hook" "grep -q 'recordConfabLearning(' $ROOT/lib/staged-workflow.ts"
+check "auto-learn:tests-exist" "test -f $ROOT/tests/auto-learn.test.ts"
+
+# ── Primitive 5: pre-spawn pattern-memory injection ───────────────────
+check "pattern-injection:imported-from-auto-learn" "grep -q 'from .*auto-learn' $ROOT/services/ensemble-service.ts"
+check "pattern-injection:queries-pattern-tags" "grep -q 'patternTags' $ROOT/services/ensemble-service.ts"
+check "pattern-injection:applies-weighting" "grep -q 'weightLearning(' $ROOT/services/ensemble-service.ts"
+check "pattern-injection:renders-prior-team-block" "grep -q 'PRIOR-TEAM PATTERNS' $ROOT/services/ensemble-service.ts"
+
+# ── Primitive 6: reflection default-ON ────────────────────────────────
+check "reflection:default-on" "grep -F \"ENSEMBLE_REFLECTION'] !== '0'\" $ROOT/services/ensemble-service.ts"
+check "reflection:vitest-skip" "grep -q 'process.env..VITEST' $ROOT/services/ensemble-service.ts"
+
 # ── Output ────────────────────────────────────────────────────────────
 total=$(( ${#ok[@]} + ${#failures[@]} ))
 if [ "$JSON" = "1" ]; then
