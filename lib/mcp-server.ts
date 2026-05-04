@@ -104,13 +104,25 @@ const TOOLS = [
   },
   {
     name: 'ensemble_signal_complete',
-    description: 'Signal that a team is done and disband it.',
+    description: 'Signal that a team is done and disband it. If the team has operator-hold active, the disband is suppressed and the operator must release-hold first.',
     inputSchema: {
       type: 'object',
       properties: {
         teamId: { type: 'string' },
         from: { type: 'string', default: 'user' },
         note: { type: 'string' },
+      },
+      required: ['teamId'],
+    },
+  },
+  {
+    name: 'ensemble_release_hold',
+    description: 'Release the operator-hold on a team. After this call, the next [SIGNAL_COMPLETE] / [READY-TO-MERGE] / standing-by path will fire normally. Idempotent — safe to call on a team without hold.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        teamId: { type: 'string' },
+        by: { type: 'string', default: 'operator' },
       },
       required: ['teamId'],
     },
@@ -164,6 +176,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         result = await apiFetch(`/api/ensemble/teams/${args.teamId}/signal-complete`, {
           method: 'POST',
           body: JSON.stringify({ from: args.from ?? 'user', note: args.note }),
+        })
+        break
+      case 'ensemble_release_hold':
+        result = await apiFetch(`/api/ensemble/teams/${args.teamId}/release-hold`, {
+          method: 'POST',
+          body: JSON.stringify({ by: args.by ?? 'operator' }),
         })
         break
       default:

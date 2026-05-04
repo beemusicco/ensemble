@@ -10,6 +10,13 @@ export interface EnsembleTeam {
   feedMode: 'silent' | 'summary' | 'live'
   workingDirectory?: string
   result?: EnsembleTeamResult
+  // Operator-hold primitive. When true, agent-initiated and pattern-detected
+  // disbands are suppressed; only safety-net paths (lifetime-cap, soft-cap,
+  // watchdog) still fire. Set at create time by detectOperatorHold(description)
+  // OR explicitly via CreateTeamRequest.holdForOperator. Released via
+  // POST /api/ensemble/teams/:id/release-hold.
+  holdForOperator?: boolean
+  holdReason?: string
 }
 
 export interface EnsembleTeamAgent {
@@ -74,6 +81,11 @@ export interface CreateTeamRequest {
   staged?: boolean
   stagedConfig?: StagedWorkflowConfig
   challengeMode?: ChallengeMode
+  // Explicit operator-hold flag. If true, all agent-initiated and
+  // pattern-detected disbands are suppressed. If unset, the create-team
+  // path scans `description` for hold keywords (SI + EN) and sets the flag
+  // automatically. Self-describing override beats keyword detection.
+  holdForOperator?: boolean
 }
 
 /**

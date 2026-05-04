@@ -29,6 +29,7 @@ import { queryMemories, queryMemoriesSemantic, writeMemory } from '../lib/memory
 import { readProjectConfigText } from '../lib/project-config'
 import { scanAndAnswerUnknowns, flagAssumptions } from '../lib/unknown-watcher'
 import { scanAndDispatchQuestions, answerQuestion, type AnswerInput, type AnswerResult } from '../lib/question-watcher'
+import { detectOperatorHold, isReleaseHoldRequest } from '../lib/operator-hold'
 import { appendCostEntry } from '../lib/cost-ledger'
 import { startSpan, endSpan } from '../lib/tracer'
 import { analyzeThinking, pruneAlreadyWarned, getCurrentPhase } from '../lib/thinking-phases'
@@ -314,6 +315,15 @@ class EnsembleService {
 
       if (!this.shouldAutoDisband(team)) continue
 
+      // Operator-hold: idle-tax fires when an agent emitted a completion
+      // marker AND the team went quiet. That's a *claim* path — operator
+      // explicitly said "wait for me" so this disband must not fire. Safety
+      // nets (lifetime/soft-cap) already ran above and are unaffected.
+      if (team.holdForOperator) {
+        logHoldSuppression(team, 'idle-tax', 'completion signal + idle threshold')
+        continue
+      }
+
       this.disbandingTeams.add(team.id)
 
       try {
@@ -401,11 +411,22 @@ class EnsembleService {
           const hasQuorum = denom > 0 && readyEmitters.size * 2 >= denom  // >=50%
           const requiredQuietMs = hasQuorum ? READY_TO_MERGE_QUIET_MS : READY_TO_MERGE_SOLO_QUIET_MS
           if (idleMs > requiredQuietMs) {
-            const tag = hasQuorum ? `quorum ${readyEmitters.size}/${denom}` : `solo ${readyEmitters.size}/${denom}`
-            return {
-              reason: `ready-to-merge: ${tag} signaled + ${Math.round(idleMs / 60_000)}min team-idle`,
-              ageMs,
-              idleMs,
+            // Operator-hold: pattern-detected completion claim must NOT
+            // override operator's "wait for me" instruction. Log once,
+            // continue the loop (lifetime/soft-cap still fire below).
+            if (team.holdForOperator) {
+              const tag = hasQuorum ? `quorum ${readyEmitters.size}/${denom}` : `solo ${readyEmitters.size}/${denom}`
+              logHoldSuppression(
+                team, 'ready-to-merge',
+                `${tag} signaled + ${Math.round(idleMs / 60_000)}min team-idle`,
+              )
+            } else {
+              const tag = hasQuorum ? `quorum ${readyEmitters.size}/${denom}` : `solo ${readyEmitters.size}/${denom}`
+              return {
+                reason: `ready-to-merge: ${tag} signaled + ${Math.round(idleMs / 60_000)}min team-idle`,
+                ageMs,
+                idleMs,
+              }
             }
           }
         }
@@ -433,6 +454,15 @@ class EnsembleService {
         for (const pattern of STANDING_BY_PATTERNS) {
           const match = (m.content || '').match(pattern)
           if (match) {
+            // Operator-hold: agents may "stand by" without operator wanting
+            // disband. Only safety nets (lifetime/soft-cap) keep firing.
+            if (team.holdForOperator) {
+              logHoldSuppression(
+                team, 'standing-by',
+                `agents declared "${match[0]}" + ${Math.round(idleMs / 60_000)}min idle`,
+              )
+              return null
+            }
             return {
               reason: `standing-by: agents declared "${match[0]}" + ${Math.round(idleMs / 60_000)}min idle`,
               ageMs,
@@ -2133,6 +2163,18 @@ export async function sendTeamMessage(
   }
   appendMessage(teamId, message)
 
+  // Operator can release hold inline by typing "/release-hold" or
+  // "[/HOLD-OFF]" in the team feed. Only honored when sender is "user" or
+  // "operator" — agents cannot release their own hold.
+  const sender = from || 'user'
+  if (
+    team.holdForOperator &&
+    (sender === 'user' || sender === 'operator') &&
+    isReleaseHoldRequest(content)
+  ) {
+    await releaseOperatorHold(teamId, sender)
+  }
+
   // Auto-persist reflections to global memory so future teams can recall them.
   if (msgType === 'reflect') {
     try {
@@ -2149,7 +2191,6 @@ export async function sendTeamMessage(
   endSpan(span, { messageId: message.id, type: msgType })
 
   // Determine which agents should receive this message in their tmux pane
-  const sender = from || 'user'
   const recipients = to === 'team'
     ? team.agents.filter(a => a.status === 'active' && a.name !== sender)
     : team.agents.filter(a => a.status === 'active' && a.name === to)
@@ -2735,6 +2776,12 @@ export function getRecentTeams(limit = 10): ServiceResult<{ teams: EnsembleTeam[
  * auto-disband for tasks where agents can deterministically say "I'm done."
  * Posts a structured [SIGNAL_COMPLETE] message so every observer sees it,
  * then disbands the team (no idle-tax, no pattern guessing).
+ *
+ * Operator-hold guard: if the team was created with holdForOperator=true
+ * (either explicit flag or detected keyword in description), the
+ * [SIGNAL_COMPLETE] message is still posted but the disband is suppressed.
+ * Operator must POST /release-hold or send "/release-hold" / "[/HOLD-OFF]"
+ * before another signal-complete will actually disband.
  */
 export async function signalCompleteTeam(
   teamId: string, from: string, note?: string,
@@ -2750,9 +2797,75 @@ export async function signalCompleteTeam(
     content: `[SIGNAL_COMPLETE]${note ? ' ' + note.slice(0, 500) : ''}`,
     type: 'chat', timestamp: new Date().toISOString(),
   })
+  if (team.holdForOperator) {
+    appendMessage(teamId, {
+      id: uuidv4(), teamId, from: 'ensemble', to: 'team',
+      content: [
+        `📋 [SIGNAL_COMPLETE] received but team is on operator-hold (reason: ${team.holdReason ?? 'unknown'}).`,
+        `Disband suppressed — operator decides when this ends.`,
+        `To release: POST /api/ensemble/teams/${teamId}/release-hold OR send "/release-hold" in the team feed.`,
+      ].join('\n'),
+      type: 'chat', timestamp: new Date().toISOString(),
+      meta: {
+        event: 'disband_suppressed_by_hold',
+        path: 'signal-complete',
+        from,
+        holdReason: team.holdReason,
+      },
+    })
+    return { data: { team }, status: 200 }
+  }
   return disbandTeam(teamId, `signal-complete by ${from}`, {
     triggeredBy: 'signal-complete',
     by: from,
     note: note?.slice(0, 200),
+  })
+}
+
+/**
+ * Release the operator-hold on a team. Once released, future signal-complete
+ * and pattern-detected disband paths fire normally. Does NOT trigger an
+ * immediate disband — operator must signal-complete or wait for the team's
+ * own completion path. Idempotent: releasing a team that has no hold is a no-op.
+ */
+export async function releaseOperatorHold(
+  teamId: string, by: string,
+): Promise<ServiceResult<{ team: EnsembleTeam }>> {
+  const team = getTeam(teamId)
+  if (!team) return { error: 'Team not found', status: 404 }
+  if (!team.holdForOperator) {
+    return { data: { team }, status: 200 }
+  }
+  const updated = updateTeam(teamId, {
+    holdForOperator: false,
+    holdReason: undefined,
+  })
+  appendMessage(teamId, {
+    id: uuidv4(), teamId, from: 'ensemble', to: 'team',
+    content: `🔓 Operator-hold released by ${by}. Future [SIGNAL_COMPLETE] / [READY-TO-MERGE] / standing-by disbands now fire normally.`,
+    type: 'chat', timestamp: new Date().toISOString(),
+    meta: { event: 'hold_released', by },
+  })
+  return { data: { team: updated ?? team }, status: 200 }
+}
+
+/**
+ * Internal helper. Returns true if the team has an active operator-hold AND
+ * logs a structured "would-disband suppressed" event so calibration can count
+ * how often the hold actually saves a team. Rate-limited per-team to once per
+ * 5 minutes per path so we don't spam the feed every 15s tick.
+ */
+const lastSuppressLogByTeamPath = new Map<string, number>()
+function logHoldSuppression(team: EnsembleTeam, path: string, detail: string): void {
+  const key = `${team.id}:${path}`
+  const now = Date.now()
+  const last = lastSuppressLogByTeamPath.get(key) ?? 0
+  if (now - last < 5 * 60 * 1000) return
+  lastSuppressLogByTeamPath.set(key, now)
+  appendMessage(team.id, {
+    id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
+    content: `📋 Auto-disband (${path}) suppressed — operator-hold active. ${detail}`,
+    type: 'chat', timestamp: new Date().toISOString(),
+    meta: { event: 'disband_suppressed_by_hold', path, holdReason: team.holdReason, detail },
   })
 }

@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid'
 import type { EnsembleTeam, EnsembleMessage, CreateTeamRequest } from '../types/ensemble'
 import { getEnsembleRegistryDir } from './ensemble-paths'
 import { collabMessagesFile } from './collab-paths'
+import { detectOperatorHold } from './operator-hold'
 
 const ENSEMBLE_DIR = getEnsembleRegistryDir()
 const TEAMS_FILE = path.join(ENSEMBLE_DIR, 'teams.json')
@@ -199,6 +200,20 @@ export function getTeam(id: string): EnsembleTeam | undefined {
 export function createTeam(request: CreateTeamRequest): EnsembleTeam {
   return withTeamsLock(() => {
     const teams = readTeamsFile()
+    // Operator-hold detection. Explicit flag wins; otherwise scan description
+    // for keywords (SI + EN). Either path sets holdForOperator + holdReason.
+    let holdForOperator: boolean | undefined
+    let holdReason: string | undefined
+    if (request.holdForOperator === true) {
+      holdForOperator = true
+      holdReason = 'explicit:api-flag'
+    } else {
+      const detected = detectOperatorHold(request.description)
+      if (detected.hold) {
+        holdForOperator = true
+        holdReason = detected.reason
+      }
+    }
     const team: EnsembleTeam = {
       id: uuidv4(),
       name: request.name,
@@ -216,6 +231,7 @@ export function createTeam(request: CreateTeamRequest): EnsembleTeam {
       createdAt: new Date().toISOString(),
       feedMode: request.feedMode || 'live',
       workingDirectory: request.workingDirectory,
+      ...(holdForOperator ? { holdForOperator, holdReason } : {}),
     }
     teams.push(team)
     writeTeamsFile(teams)

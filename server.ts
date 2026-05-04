@@ -8,6 +8,7 @@ import {
   createEnsembleTeam, getEnsembleTeam, listEnsembleTeams,
   getTeamFeed, sendTeamMessage, disbandTeam, signalCompleteTeam,
   searchHistory, getRecentTeams, answerPendingQuestion,
+  releaseOperatorHold,
 } from './services/ensemble-service'
 import { getTeam } from './lib/ensemble-registry'
 import { verifyBearer, getAuthToken, getAuthTokenPath } from './lib/auth'
@@ -256,6 +257,22 @@ const server = http.createServer(async (req, res) => {
       const from = (body.from as string) || ''
       if (!from) return json(res, { error: 'from required' }, 400, origin)
       const result = await signalCompleteTeam(signalMatch[1], from, body.note as string | undefined)
+      if (result.error) return json(res, { error: result.error }, result.status, origin)
+      return json(res, result.data, result.status, origin)
+    }
+
+    // Release operator-hold: /api/ensemble/teams/:id/release-hold
+    const releaseMatch = path.match(/^\/api\/ensemble\/teams\/([^/]+)\/release-hold$/)
+    if (releaseMatch && method === 'POST') {
+      let body: Record<string, unknown> = {}
+      const raw = await readBody(req)
+      if (raw.trim()) {
+        try { body = JSON.parse(raw) } catch {
+          return json(res, { error: 'Bad Request: malformed JSON' }, 400, origin)
+        }
+      }
+      const by = (body.by as string) || 'operator'
+      const result = await releaseOperatorHold(releaseMatch[1], by)
       if (result.error) return json(res, { error: result.error }, result.status, origin)
       return json(res, result.data, result.status, origin)
     }

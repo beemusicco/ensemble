@@ -59,6 +59,9 @@ function makeTeam(overrides: Partial<EnsembleTeam> = {}): EnsembleTeam {
     completedAt: overrides.completedAt,
     feedMode: overrides.feedMode ?? 'live',
     result: overrides.result,
+    // Spread overrides at the end so optional fields (holdForOperator,
+    // holdReason, workingDirectory) propagate without per-field plumbing.
+    ...overrides,
   }
 }
 
@@ -2138,5 +2141,211 @@ describe('CreateTeamRequest staged types', () => {
       agents: [{ program: 'codex' }],
     }
     expect(request.staged).toBeUndefined()
+  })
+})
+
+// ─────────────────────────────────────────────────────
+// Operator-hold integration — suppress agent-initiated and
+// pattern-detected disbands; safety nets must still fire.
+// ─────────────────────────────────────────────────────
+describe('operator-hold suppression', () => {
+  const originalDataDir = process.env.ENSEMBLE_DATA_DIR
+  let tempRoot: string
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ensemble-hold-'))
+    process.env.ENSEMBLE_DATA_DIR = tempRoot
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-03-18T12:30:00.000Z'))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    vi.resetModules()
+    vi.doUnmock('../lib/ensemble-registry')
+    vi.doUnmock('../lib/agent-spawner')
+    vi.doUnmock('../lib/hosts-config')
+    vi.doUnmock('../lib/agent-runtime')
+    vi.doUnmock('../lib/agent-config')
+    vi.doUnmock('../lib/worktree-manager')
+    if (originalDataDir === undefined) delete process.env.ENSEMBLE_DATA_DIR
+    else process.env.ENSEMBLE_DATA_DIR = originalDataDir
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  })
+
+  async function setupHoldServiceMocks(team: EnsembleTeam, messages: EnsembleMessage[]) {
+    const appendedMessages: EnsembleMessage[] = []
+    const updates: Array<Partial<EnsembleTeam>> = []
+    let currentTeam = team
+    vi.doMock('../lib/ensemble-registry', () => ({
+      getMessages: vi.fn(() => messages),
+      loadTeams: vi.fn(() => [currentTeam]),
+      loadAllTeamsIncludingArchives: vi.fn(() => [currentTeam]),
+      appendMessage: vi.fn((_id: string, msg: EnsembleMessage) => appendedMessages.push(msg)),
+      updateTeam: vi.fn((_id: string, u: Partial<EnsembleTeam>) => {
+        updates.push(u)
+        currentTeam = { ...currentTeam, ...u }
+        return currentTeam
+      }),
+      createTeam: vi.fn(),
+      getTeam: vi.fn(() => currentTeam),
+      saveTeams: vi.fn(),
+      getActiveTeamsByWorkingDir: vi.fn(() => []),
+    }))
+    vi.doMock('../lib/agent-spawner', () => ({
+      spawnLocalAgent: vi.fn(), killLocalAgent: vi.fn(),
+      spawnRemoteAgent: vi.fn(), killRemoteAgent: vi.fn(),
+      postRemoteSessionCommand: vi.fn(), isRemoteSessionReady: vi.fn(),
+      getAgentTokenUsage: vi.fn(async () => 'unknown'),
+    }))
+    vi.doMock('../lib/hosts-config', () => ({
+      isSelf: vi.fn(() => true), getHostById: vi.fn(),
+      getSelfHostId: vi.fn(() => 'local'),
+    }))
+    vi.doMock('../lib/agent-runtime', () => ({
+      getRuntime: vi.fn(() => ({
+        capturePane: vi.fn(), sendKeys: vi.fn(), pasteFromFile: vi.fn(),
+      })),
+    }))
+    vi.doMock('../lib/agent-config', () => ({
+      resolveAgentProgram: vi.fn(() => ({ readyMarker: '>', inputMethod: 'sendKeys' })),
+    }))
+    vi.doMock('../lib/worktree-manager', () => ({
+      createWorktree: vi.fn(), mergeWorktree: vi.fn(),
+      destroyWorktree: vi.fn(), uncommittedChanges: vi.fn(async () => false),
+      evaluateWorktreeDisposition: vi.fn(async () => ({ action: 'destroy' })),
+    }))
+
+    const mod = await import('../services/ensemble-service')
+    return { mod, appendedMessages, updates, getCurrentTeam: () => currentTeam }
+  }
+
+  it('signalCompleteTeam: with hold=true, posts SIGNAL_COMPLETE message but does NOT disband', async () => {
+    const team = makeTeam({ holdForOperator: true, holdReason: 'keyword:si:ne-disband' })
+    const { mod, appendedMessages, getCurrentTeam } = await setupHoldServiceMocks(team, [])
+
+    const result = await mod.signalCompleteTeam(team.id, 'codex-1', 'work done')
+
+    expect(result.status).toBe(200)
+    expect(getCurrentTeam().status).toBe('active')      // not disbanded
+    expect(appendedMessages.some(m => m.content.includes('[SIGNAL_COMPLETE]'))).toBe(true)
+    expect(appendedMessages.some(m => /Disband suppressed/.test(m.content))).toBe(true)
+    expect(appendedMessages.some(m => m.meta?.event === 'disband_suppressed_by_hold')).toBe(true)
+  })
+
+  it('signalCompleteTeam: with hold=false, behavior is unchanged (would call disbandTeam)', async () => {
+    const team = makeTeam()
+    const { mod, appendedMessages } = await setupHoldServiceMocks(team, [])
+
+    // Just check that the [SIGNAL_COMPLETE] marker is posted; downstream
+    // disbandTeam logic needs a fully-wired runtime that we don't mock here.
+    // Hold suppression branch should NOT fire.
+    await mod.signalCompleteTeam(team.id, 'codex-1', 'work done').catch(() => {})
+
+    expect(appendedMessages.some(m => m.content.includes('[SIGNAL_COMPLETE]'))).toBe(true)
+    expect(appendedMessages.some(m => /Disband suppressed/.test(m.content))).toBe(false)
+  })
+
+  it('releaseOperatorHold: clears flag, posts release message, idempotent on second call', async () => {
+    const team = makeTeam({ holdForOperator: true, holdReason: 'keyword:en:do-not-disband' })
+    const { mod, appendedMessages, updates, getCurrentTeam } = await setupHoldServiceMocks(team, [])
+
+    const r1 = await mod.releaseOperatorHold(team.id, 'operator')
+    expect(r1.status).toBe(200)
+    expect(getCurrentTeam().holdForOperator).toBe(false)
+    expect(appendedMessages.some(m => /released/i.test(m.content) && m.meta?.event === 'hold_released')).toBe(true)
+    expect(updates.length).toBe(1)
+
+    const r2 = await mod.releaseOperatorHold(team.id, 'operator')
+    expect(r2.status).toBe(200)
+    expect(updates.length).toBe(1)  // no second update
+  })
+
+  it('idle-tax / shouldAutoDisband: hold=true blocks disband when completion signal + idle present', async () => {
+    const team = makeTeam({
+      holdForOperator: true,
+      holdReason: 'keyword:en:wait-for-human',
+      createdAt: new Date('2026-03-18T12:00:00.000Z').toISOString(),
+    })
+    const messages: EnsembleMessage[] = [
+      ...makeFillerMessages('team-1', '2026-03-18T12:25:00.000Z'),
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'All work finished [DONE]', timestamp: '2026-03-18T12:25:00.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'My part is [COMPLETE]', timestamp: '2026-03-18T12:25:30.000Z' }),
+    ]
+    const { mod, appendedMessages, getCurrentTeam } = await setupHoldServiceMocks(team, messages)
+    await mod.checkIdleTeams()
+
+    // Idle-tax disband suppressed:
+    expect(getCurrentTeam().status).toBe('active')
+    // Did NOT post a real disband-trigger marker (which contains "🛑")
+    expect(appendedMessages.some(m => /🛑.*disband triggered/.test(m.content))).toBe(false)
+    // Did post a hold-suppression notice:
+    expect(appendedMessages.some(m => m.meta?.event === 'disband_suppressed_by_hold' && m.meta?.path === 'idle-tax')).toBe(true)
+  })
+
+  it('lifetime-cap: hold=true does NOT suppress (safety net must fire)', async () => {
+    // Team age = 100min, exceeds default 90min lifetime cap.
+    const team = makeTeam({
+      holdForOperator: true,
+      holdReason: 'keyword:en:hold-position',
+      createdAt: new Date('2026-03-18T10:50:00.000Z').toISOString(),
+    })
+    const messages: EnsembleMessage[] = [
+      ...makeFillerMessages('team-1', '2026-03-18T12:29:00.000Z'),
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'still alive', timestamp: '2026-03-18T12:29:00.000Z' }),
+    ]
+    const { mod, appendedMessages } = await setupHoldServiceMocks(team, messages)
+    await mod.checkIdleTeams()
+
+    // Lifetime-cap fires regardless of hold — disband marker must be posted.
+    expect(appendedMessages.some(m => /lifetime-cap/.test(m.content))).toBe(true)
+  })
+
+  it('createTeam: detects hold keyword in description and sets flag automatically', async () => {
+    // We don't go through full createEnsembleTeam (that spawns agents),
+    // just test the registry's createTeam which is what the detector wires into.
+    delete process.env.ENSEMBLE_DATA_DIR
+    process.env.ENSEMBLE_DATA_DIR = tempRoot
+    vi.resetModules()
+    const { createTeam } = await import('../lib/ensemble-registry')
+
+    const team = createTeam({
+      name: 'hold-keyword-test',
+      description: 'Do the work. ⚠️ KRITIČNO: NE DISBAND-AJTE. Človek odloča.',
+      agents: [{ program: 'codex' }],
+    })
+    expect(team.holdForOperator).toBe(true)
+    expect(team.holdReason).toMatch(/^keyword:/)
+  })
+
+  it('createTeam: explicit holdForOperator=true wins even without keywords', async () => {
+    delete process.env.ENSEMBLE_DATA_DIR
+    process.env.ENSEMBLE_DATA_DIR = tempRoot
+    vi.resetModules()
+    const { createTeam } = await import('../lib/ensemble-registry')
+
+    const team = createTeam({
+      name: 'explicit-flag-test',
+      description: 'Refactor invoice service.',
+      agents: [{ program: 'codex' }],
+      holdForOperator: true,
+    })
+    expect(team.holdForOperator).toBe(true)
+    expect(team.holdReason).toBe('explicit:api-flag')
+  })
+
+  it('createTeam: no hold flag and no keyword → holdForOperator stays unset', async () => {
+    delete process.env.ENSEMBLE_DATA_DIR
+    process.env.ENSEMBLE_DATA_DIR = tempRoot
+    vi.resetModules()
+    const { createTeam } = await import('../lib/ensemble-registry')
+
+    const team = createTeam({
+      name: 'normal-task',
+      description: 'Refactor invoice service. Run tests. Ship it.',
+      agents: [{ program: 'codex' }],
+    })
+    expect(team.holdForOperator).toBeFalsy()
   })
 })
