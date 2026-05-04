@@ -3,7 +3,7 @@ import { recommendRoleAssignments, type RoleAssignment } from '../lib/calibratio
 import type { CalibrationSummary, AgentMetrics } from '../lib/calibration'
 
 function metrics(overrides: Partial<AgentMetrics> & { program: string }): AgentMetrics {
-  return {
+  const base: AgentMetrics = {
     agent: overrides.program,
     program: overrides.program,
     teamCount: 50,
@@ -16,8 +16,8 @@ function metrics(overrides: Partial<AgentMetrics> & { program: string }): AgentM
     assumptionAccuracy: -1,
     questionAnswerRate: -1,
     cleanlinessScore: 1,
-    ...overrides,
   }
+  return { ...base, ...overrides }
 }
 
 function summaryWith(perProgram: AgentMetrics[]): CalibrationSummary {

@@ -414,6 +414,26 @@ export class StagedWorkflowManager {
           },
         })
 
+        // W7: spawn fresh-context rescue agent if the gate genuinely failed
+        // (mechanical-gate fail → not just NO-GO sentiment). Hard cap at 1
+        // per team enforced inside rescueFailingTeam. Fire-and-forget so
+        // the staged workflow doesn't block on the rescue spawn.
+        if (stillMechFail && verifyRunSummary && process.env['ENSEMBLE_AUTO_RESCUE_SPAWN'] !== '0') {
+          const failedCheck = verifyRunSummary.results.find(r => r.status === 'fail' || r.status === 'error')
+          if (failedCheck) {
+            void import('../services/ensemble-service').then(({ rescueFailingTeam }) => {
+              return rescueFailingTeam(this.options.team.id, {
+                gateId: failedCheck.id,
+                errorContext: failedCheck.output.slice(0, 1500),
+              }).catch(err => {
+                console.warn(`[auto-rescue] spawn failed: ${err?.message ?? err}`)
+              })
+            }).catch(err => {
+              console.warn(`[auto-rescue] import failed: ${err?.message ?? err}`)
+            })
+          }
+        }
+
         // W4: persist a failure-pattern learning so the next team in this
         // project gets pre-flight warned and doesn't re-discover the same
         // gate failure. Fire-and-forget — don't block the team's lifecycle.

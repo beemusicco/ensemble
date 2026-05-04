@@ -144,6 +144,21 @@ check "cognee:env-gated" "grep -q 'ENSEMBLE_USE_KG' $ROOT/lib/cognee-bridge.ts"
 check "cognee:graceful-degrade" "grep -q 'fetchWithTimeout' $ROOT/lib/cognee-bridge.ts"
 check "cognee:wired-in-spawn" "grep -q 'cognee.searchGraph' $ROOT/services/ensemble-service.ts"
 check "cognee:tests-exist" "test -f $ROOT/tests/cognee-bridge.test.ts"
+check "cognee:writeback-on-disband" "grep -q 'kg_writeback' $ROOT/services/ensemble-service.ts"
+
+# ── Primitive 13: rescue agent spawn (W7) ─────────────────────────────
+check "rescue-spawn:fn-exported" "grep -q 'export async function rescueFailingTeam' $ROOT/services/ensemble-service.ts"
+check "rescue-spawn:env-gate" "grep -q 'ENSEMBLE_AUTO_RESCUE_SPAWN' $ROOT/services/ensemble-service.ts"
+check "rescue-spawn:cap-1-per-team" "grep -q 'rescue-already-spawned' $ROOT/services/ensemble-service.ts"
+check "rescue-spawn:wired-from-staged-workflow" "grep -q 'rescueFailingTeam(' $ROOT/lib/staged-workflow.ts"
+check "rescue-spawn:test-mode-short-circuit" "grep -q 'test-mode' $ROOT/services/ensemble-service.ts"
+
+# ── Primitive 14: calibration role assignment wired (W7) ──────────────
+check "role-wired:applyCalibrationRoleAssignment" "grep -q 'applyCalibrationRoleAssignment' $ROOT/services/ensemble-service.ts"
+check "role-wired:roleClassForCalibration" "grep -q 'roleClassForCalibration' $ROOT/services/ensemble-service.ts"
+check "role-wired:env-opt-out" "grep -q 'ENSEMBLE_CALIBRATION_ROLE_ASSIGN' $ROOT/services/ensemble-service.ts"
+check "role-wired:emits-feed-msg" "grep -q 'calibration_role_assignment' $ROOT/services/ensemble-service.ts"
+check "role-wired:tests-exist" "test -f $ROOT/tests/w7-integration.test.ts"
 
 # ── Output ────────────────────────────────────────────────────────────
 total=$(( ${#ok[@]} + ${#failures[@]} ))

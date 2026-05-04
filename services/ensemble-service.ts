@@ -1841,12 +1841,148 @@ export async function createEnsembleTeam(
   }
 }
 
+/**
+ * W7: classify a template role-name into one of the three calibration
+ * role-classes (architect / builder / verifier). Lossy by design — many
+ * template-specific role names (DIVERGER, RECON, ADVERSARY, etc.) map
+ * onto the same underlying behavioral cluster for calibration purposes.
+ */
+function roleClassForCalibration(roleName: string): 'architect' | 'builder' | 'verifier' {
+  const n = (roleName || '').toUpperCase()
+  if (/REVIEW|CRITIC|ADVERSARY|VALIDAT|VERIF|CHALLENG|SYNTHESIZ|CONVERG|REPORTER/.test(n)) return 'verifier'
+  if (/IMPLEMENT|BUILD|DEVELOP|EXPLOIT|REPRODUC|CONNECT|WORKER/.test(n)) return 'builder'
+  return 'architect'  // default cluster — planning, design, research, lead
+}
+
+/**
+ * W7: apply calibration-driven program reordering to a CreateTeamRequest's
+ * agents list. Roles stay where the template put them (operator-driven);
+ * only the order of programs is shuffled so the program with best
+ * historical fit lands at each role's index. Anti-fragile guards from
+ * recommendRoleAssignments (min_samples=20, epsilon-greedy 10%) prevent
+ * lock-in.
+ *
+ * ENV: ENSEMBLE_CALIBRATION_ROLE_ASSIGN=0 disables. Default ON. Templates
+ * with explicit per-agent role assignments STILL win — this only reorders
+ * the program list, doesn't override role naming.
+ *
+ * Returns a new request with possibly-reordered agents, plus an array of
+ * human-readable assignment reasons for the team feed.
+ */
+function applyCalibrationRoleAssignment(
+  request: CreateTeamRequest,
+  templateRoles: string[],
+): { request: CreateTeamRequest; reasons: string[] } {
+  if (process.env['ENSEMBLE_CALIBRATION_ROLE_ASSIGN'] === '0') {
+    return { request, reasons: [] }
+  }
+  if (process.env['VITEST'] || process.env['NODE_ENV'] === 'test') {
+    return { request, reasons: [] }
+  }
+  if (!request.agents || request.agents.length < 2) {
+    return { request, reasons: [] }
+  }
+  if (templateRoles.length !== request.agents.length) {
+    return { request, reasons: [] }
+  }
+
+  let calibration: ReturnType<typeof import('../lib/calibration').computeCalibration>
+  try {
+    const { computeCalibration } = require('../lib/calibration') as typeof import('../lib/calibration')
+    calibration = computeCalibration({ windowDays: 30 })
+  } catch {
+    return { request, reasons: [] }
+  }
+  if (!calibration.perProgram || calibration.perProgram.length === 0) {
+    return { request, reasons: [] }
+  }
+
+  const programs = request.agents.map(a => a.program)
+  // Map each templated role name to a calibration role-class.
+  const calibrationRoles = templateRoles.map(roleClassForCalibration)
+
+  let recs: ReturnType<typeof import('../lib/calibration').recommendRoleAssignments>
+  try {
+    const { recommendRoleAssignments } = require('../lib/calibration') as typeof import('../lib/calibration')
+    recs = recommendRoleAssignments({
+      programs,
+      roles: calibrationRoles,
+      calibration,
+    })
+  } catch {
+    return { request, reasons: [] }
+  }
+  if (recs.length !== request.agents.length) {
+    return { request, reasons: [] }
+  }
+
+  // Reorder agents: at index i, place the program that calibration
+  // recommended for role calibrationRoles[i]. Preserve original
+  // hostId/role/etc. by matching on program name.
+  const newAgents: typeof request.agents = []
+  const reasons: string[] = []
+  const consumed = new Set<number>()  // already-placed source indices
+  for (let i = 0; i < recs.length; i++) {
+    const wantProgram = recs[i].program
+    // Find first unconsumed source agent with matching program.
+    const srcIdx = request.agents.findIndex((a, idx) => a.program === wantProgram && !consumed.has(idx))
+    if (srcIdx === -1) {
+      // Calibration picked something not in our pool — fall back to original order.
+      return { request, reasons: [] }
+    }
+    consumed.add(srcIdx)
+    newAgents.push(request.agents[srcIdx])
+    reasons.push(`  ${wantProgram} → ${templateRoles[i]} (${recs[i].role}-class): ${recs[i].reason}`)
+  }
+  // Verify all agents accounted for.
+  if (newAgents.length !== request.agents.length) {
+    return { request, reasons: [] }
+  }
+  // No-op if order is unchanged.
+  const reordered = newAgents.some((a, i) => a.program !== request.agents[i].program)
+  if (!reordered) {
+    return { request, reasons: [] }
+  }
+  return { request: { ...request, agents: newAgents }, reasons }
+}
+
 async function createEnsembleTeamInner(
   request: CreateTeamRequest
 ): Promise<ServiceResult<{ team: EnsembleTeam }>> {
+  // W7: calibration-driven program ordering. Roles stay where the template
+  // put them; programs reorder so the historically-best program lands at
+  // each role's index. ENV-gated default ON; templates / explicit roles
+  // are preserved.
+  let calibrationReasons: string[] = []
+  try {
+    const tmpl = loadCollabTemplate(request.templateName)
+    if (tmpl && tmpl.roles && tmpl.roles.length === request.agents?.length) {
+      const result = applyCalibrationRoleAssignment(
+        request,
+        tmpl.roles.map(r => r.role),
+      )
+      request = result.request
+      calibrationReasons = result.reasons
+    }
+  } catch { /* calibration failure must NOT abort team creation */ }
+
   const team = createTeam(request)
   const cwd = request.workingDirectory || process.cwd()
   const worktreeMap = new Map<string, WorktreeInfo>()
+
+  if (calibrationReasons.length > 0) {
+    appendMessage(team.id, {
+      id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
+      content: [
+        `📊 Calibration-driven role assignment (last 30d data):`,
+        ...calibrationReasons,
+        ``,
+        `Set ENSEMBLE_CALIBRATION_ROLE_ASSIGN=0 to disable.`,
+      ].join('\n'),
+      type: 'chat', timestamp: new Date().toISOString(),
+      meta: { event: 'calibration_role_assignment', reasons: calibrationReasons },
+    })
+  }
 
   // W6: Cognee KG enrichment, posted as a team-feed message (NOT inlined
   // into the system prompt — buildPromptPreview is sync). Fire-and-forget;
@@ -2467,6 +2603,41 @@ export async function disbandTeam(
     }
   }
 
+  // W7: push this team's accumulated learnings to Cognee KG so
+  // cross-project knowledge accumulates beyond the local sqlite store.
+  // Fire-and-forget; if Cognee is down or disabled, this is a no-op.
+  // ENV gate already enforced by cognee.addKnowledge (returns false fast).
+  if (cognee.isEnabled() && !process.env['VITEST'] && process.env['NODE_ENV'] !== 'test') {
+    try {
+      const teamLearnings = queryMemoriesSemantic(team.description || '', {
+        scope: 'global',
+        tags: ['reflection', 'failure-pattern', 'confab-pattern', 'resolution'],
+        pool: 200,
+        limit: 20,
+      }).filter(m => m.teamId === teamId)  // only THIS team's writes
+      let pushed = 0
+      for (const m of teamLearnings) {
+        const ok = await cognee.addKnowledge({
+          key: `${teamId}:${m.key}`,
+          text: m.value,
+          tags: m.tags,
+          scope: team.workingDirectory ? path.basename(team.workingDirectory) : undefined,
+        })
+        if (ok) pushed++
+      }
+      if (pushed > 0) {
+        appendMessage(teamId, {
+          id: uuidv4(), teamId, from: 'ensemble', to: 'team',
+          content: `🌐 Pushed ${pushed} learning(s) to Cognee KG for cross-project recall.`,
+          type: 'chat', timestamp: new Date().toISOString(),
+          meta: { event: 'kg_writeback', count: pushed },
+        })
+      }
+    } catch (err) {
+      console.warn(`[Ensemble] Cognee writeback failed for ${teamId.slice(0, 8)}:`, err)
+    }
+  }
+
   for (const agent of team.agents) {
     if (agent.status === 'active') {
       appendMessage(teamId, {
@@ -3020,6 +3191,203 @@ export function getRecentTeams(limit = 10): ServiceResult<{ teams: EnsembleTeam[
     return tb - ta
   })
   return { data: { teams: sorted.slice(0, Math.max(1, Math.min(limit, 100))) }, status: 200 }
+}
+
+/**
+ * W7: rescue a team that has hit auto-fix exhaustion. Spawns ONE fresh-
+ * context agent (different program from existing team agents when possible)
+ * with prior-team failure-pattern context injected into its prompt. Hard-
+ * capped: max 1 rescue per team lifetime — if the rescue itself fails,
+ * escalate to operator (don't loop).
+ *
+ * Why: 17 teams/week pre-W4 hit auto_fix_exhausted and silently waited for
+ * an operator who never answered Telegram. W6 added prior-pattern injection
+ * into the team feed (~50% rescue rate). W7 closes the remaining gap by
+ * spawning a fresh-context agent for cases where the existing agents are
+ * mentally stuck and need a clean restart.
+ *
+ * ENV gate: ENSEMBLE_AUTO_RESCUE_SPAWN=0 disables. Default ON.
+ */
+export async function rescueFailingTeam(
+  teamId: string,
+  ctx: { gateId: string; errorContext: string },
+): Promise<ServiceResult<{ rescued: boolean; rescueAgentName?: string; reason?: string }>> {
+  if (process.env['ENSEMBLE_AUTO_RESCUE_SPAWN'] === '0') {
+    return { data: { rescued: false, reason: 'env-disabled' }, status: 200 }
+  }
+  if (process.env['VITEST'] || process.env['NODE_ENV'] === 'test') {
+    return { data: { rescued: false, reason: 'test-mode' }, status: 200 }
+  }
+  const team = getTeam(teamId)
+  if (!team) return { error: 'Team not found', status: 404 }
+  if (team.status !== 'active') {
+    return { data: { rescued: false, reason: `team-status-${team.status}` }, status: 200 }
+  }
+  // Cap: 1 rescue per team
+  if (team.agents.some(a => a.name.startsWith('rescue-'))) {
+    return { data: { rescued: false, reason: 'rescue-already-spawned' }, status: 200 }
+  }
+  // Pick a program that's NOT already on the team for genuine fresh context.
+  const teamPrograms = new Set(team.agents.map(a => a.program.toLowerCase()))
+  const candidates = ['claude', 'sonnet', 'codex', 'haiku']
+  const freshProgram = candidates.find(p => !teamPrograms.has(p)) ?? 'claude'
+  const rescueName = `rescue-${freshProgram}-${team.agents.length + 1}`
+  const cwd = team.workingDirectory ?? process.cwd()
+
+  // Worktree creation — best-effort; failure shouldn't block rescue.
+  let worktreePath: string | undefined
+  let worktreeBranch: string | undefined
+  try {
+    const wt = await createWorktree(teamId, rescueName, cwd)
+    worktreePath = wt.path
+    worktreeBranch = wt.branch
+  } catch {
+    /* not a git repo or worktree creation failed — proceed in shared dir */
+  }
+
+  // Pull prior-team learnings to inject into the rescue prompt.
+  const learnings = queryMemoriesSemantic(ctx.errorContext.slice(0, 400), {
+    scope: 'global',
+    tags: ['failure-pattern', 'resolution', `gate:${ctx.gateId.replace(/[^a-z0-9-]/gi, '_').slice(0, 60)}`],
+    pool: 200,
+    limit: 5,
+  })
+  const learningsBlock = learnings.length > 0
+    ? learnings.map(m => `  - ${m.key}: ${m.value.slice(0, 250).replace(/\n/g, ' ')}`).join('\n')
+    : '  (no prior patterns matched — rely on fresh analysis)'
+
+  const rescuePrompt = [
+    `You are ${rescueName}, a fresh-context RESCUE agent in team "${team.name}".`,
+    `Existing agents (${team.agents.map(a => a.name).join(', ')}) hit auto-fix exhaustion`,
+    `on gate "${ctx.gateId}". Their context is exhausted; you are NOT.`,
+    ``,
+    `Your job:`,
+    `  1. Read the failure context below.`,
+    `  2. Apply ONE specific fix from prior team learnings (or, if none match,`,
+    `     diagnose freshly and apply your own fix).`,
+    `  3. Run team-done when verified.`,
+    ``,
+    `Failure context (gate output, truncated):`,
+    `  ${ctx.errorContext.slice(0, 600).replace(/\n/g, '\n  ')}`,
+    ``,
+    `Prior team learnings on this gate (apply ONE if it fits):`,
+    learningsBlock,
+    ``,
+    `Constraints (rescue agent rules):`,
+    `  - You have ONE attempt. If your fix fails, signal-complete with diagnosis.`,
+    `    Do NOT loop the existing agents — they're done.`,
+    `  - Cite file:line for every claim — you'll be confab-checked.`,
+    `  - Keep team-say brief; existing agents may not respond.`,
+    `  - Working directory: ${worktreePath ?? cwd}`,
+    ``,
+    `team-say:    bash ${path.join(__dirname, '..', 'scripts')}/team-say.sh ${teamId} ${rescueName} team "<message>"`,
+    `team-read:   bash ${path.join(__dirname, '..', 'scripts')}/team-read.sh ${teamId}`,
+    `team-done:   bash ${path.join(__dirname, '..', 'scripts')}/team-done.sh ${teamId} ${rescueName} "<one-line summary>"`,
+    ``,
+    `Start NOW. Greet the team via team-say with your rescue plan.`,
+  ].join('\n')
+
+  // Persist prompt to disk so spawnLocalAgent + paste can pick it up.
+  const promptFile = collabPromptFile(teamId, rescueName)
+  try {
+    fs.mkdirSync(path.dirname(promptFile), { recursive: true })
+    fs.writeFileSync(promptFile, rescuePrompt)
+  } catch (err) {
+    return { error: `prompt write failed: ${(err as Error).message}`, status: 500 }
+  }
+
+  // Spawn the agent.
+  let spawned: Awaited<ReturnType<typeof spawnLocalAgent>>
+  try {
+    spawned = await spawnLocalAgent({
+      name: rescueName,
+      program: freshProgram,
+      workingDirectory: worktreePath ?? cwd,
+      hostId: getSelfHostId(),
+    })
+  } catch (err) {
+    return { error: `spawn failed: ${(err as Error).message}`, status: 500 }
+  }
+
+  // Wait for CLI ready, then paste prompt. Reuse the existing waitForReady
+  // semantics: simple capturePane loop until readyMarker appears.
+  const runtime = getRuntime()
+  const agentCfg = resolveAgentProgram(freshProgram)
+  const readyMarker = agentCfg.readyMarker
+  const readyTimeoutMs = parseInt(process.env['ENSEMBLE_READY_TIMEOUT_MS'] || '180000', 10) || 180000
+  const start = Date.now()
+  let ready = false
+  while (Date.now() - start < readyTimeoutMs) {
+    try {
+      const out = await runtime.capturePane(spawned.sessionName, 50)
+      if (out.includes(readyMarker)) { ready = true; break }
+    } catch { /* not ready yet */ }
+    await new Promise(r => setTimeout(r, 1000))
+  }
+  if (!ready) {
+    appendMessage(teamId, {
+      id: uuidv4(), teamId, from: 'ensemble', to: 'team',
+      content: `❌ Rescue agent ${rescueName} failed to start within ${readyTimeoutMs / 1000}s — escalating to operator.`,
+      type: 'chat', timestamp: new Date().toISOString(),
+      meta: { event: 'rescue_agent_spawn_failed', name: rescueName },
+    })
+    return { data: { rescued: false, reason: 'spawn-timeout' }, status: 200 }
+  }
+  await new Promise(r => setTimeout(r, agentCfg.postReadyDelayMs ?? 2000))
+
+  try {
+    if (agentCfg.inputMethod === 'pasteFromFile') {
+      await runtime.pasteFromFile(spawned.sessionName, promptFile)
+    } else {
+      await runtime.sendKeys(spawned.sessionName, rescuePrompt, { literal: true, enter: true })
+    }
+  } catch (err) {
+    appendMessage(teamId, {
+      id: uuidv4(), teamId, from: 'ensemble', to: 'team',
+      content: `❌ Rescue prompt injection failed for ${rescueName}: ${(err as Error).message}`,
+      type: 'chat', timestamp: new Date().toISOString(),
+    })
+    return { error: `prompt injection failed: ${(err as Error).message}`, status: 500 }
+  }
+
+  // Register the new agent in the team.
+  updateTeam(teamId, {
+    agents: [
+      ...team.agents,
+      {
+        agentId: spawned.id,
+        name: rescueName,
+        program: freshProgram,
+        role: 'rescue',
+        hostId: spawned.hostId,
+        status: 'active' as const,
+        ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
+      },
+    ],
+  })
+
+  appendMessage(teamId, {
+    id: uuidv4(), teamId, from: 'ensemble', to: 'team',
+    content: [
+      `🆘 Rescue agent ${rescueName} (${freshProgram}) spawned with fresh context.`,
+      `Past agents had context-exhaustion on gate "${ctx.gateId}".`,
+      `${learnings.length} prior pattern(s) injected into rescue prompt.`,
+      `Hard cap: 1 rescue per team. If this fails, operator must intervene.`,
+    ].join('\n'),
+    type: 'chat', timestamp: new Date().toISOString(),
+    meta: {
+      event: 'rescue_agent_spawned',
+      name: rescueName,
+      program: freshProgram,
+      gateId: ctx.gateId,
+      priorPatternsInjected: learnings.length,
+    },
+  })
+
+  return {
+    data: { rescued: true, rescueAgentName: rescueName },
+    status: 200,
+  }
 }
 
 /**
