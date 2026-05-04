@@ -175,6 +175,31 @@ check "memory-gc:script-runnable" "test -x $ROOT/scripts/memory-gc.ts"
 check "memory-gc:cron-plist" "test -f $ROOT/launchd/co.openclaw.ensemble-memory-gc.plist.template"
 check "memory-gc:tests-exist" "test -f $ROOT/tests/memory-gc.test.ts"
 
+# ── Primitive 17: confidence-tracker (W8 calibrated forecasting) ─────
+check "confidence:module-exists" "test -f $ROOT/lib/confidence-tracker.ts"
+check "confidence:parse-fn-exported" "grep -q 'export function parseConfidenceClaims' $ROOT/lib/confidence-tracker.ts"
+check "confidence:record-fn-exported" "grep -q 'export function recordConfidenceClaim' $ROOT/lib/confidence-tracker.ts"
+check "confidence:resolve-fn-exported" "grep -q 'export function resolveClaimOutcome' $ROOT/lib/confidence-tracker.ts"
+check "confidence:calibration-fn-exported" "grep -q 'export function computeCalibration' $ROOT/lib/confidence-tracker.ts"
+check "confidence:wired-in-prompt" "grep -q 'computeConfidenceCalibration' $ROOT/services/ensemble-service.ts"
+check "confidence:tag-in-learn-on-demand" "grep -q 'CONFIDENCE: N%' $ROOT/services/ensemble-service.ts"
+check "confidence:scan-from-watcher" "grep -q 'scanAndPersistClaims' $ROOT/lib/unknown-watcher.ts"
+check "confidence:resolve-script" "test -x $ROOT/scripts/resolve-claim.ts"
+check "confidence:tests-exist" "test -f $ROOT/tests/confidence-tracker.test.ts"
+
+# ── Primitive 18: hypothesis-test template (W8 Popperian) ────────────
+check "hypothesis:template-exists" "grep -q '\"hypothesis-test\":' $ROOT/collab-templates.json"
+check "hypothesis:has-three-roles" "python3 -c 'import json; t=json.load(open(\"$ROOT/collab-templates.json\"))[\"templates\"][\"hypothesis-test\"]; assert len(t[\"roles\"])==3, t[\"roles\"]'"
+check "hypothesis:hypothesizer-role" "grep -q '\"role\": \"HYPOTHESIZER\"' $ROOT/collab-templates.json"
+check "hypothesis:falsifier-role" "grep -q '\"role\": \"FALSIFIER\"' $ROOT/collab-templates.json"
+check "hypothesis:runner-role" "grep -q '\"role\": \"RUNNER\"' $ROOT/collab-templates.json"
+check "hypothesis:keyword-detection" "grep -q 'hypothesis.test\\|falsify\\|hipotez' $ROOT/scripts/collab-launch.sh"
+
+# ── Primitive 19: counterfactual mandate (W8 rigorous mode addition) ─
+check "counterfactual:in-rigorous-block" "grep -q 'COUNTERFACTUAL MANDATE' $ROOT/services/ensemble-service.ts"
+check "counterfactual:requires-Y-alternative" "grep -q 'strongest alternative' $ROOT/services/ensemble-service.ts"
+check "counterfactual:requires-confidence-tag" "grep -q 'X wins on metric' $ROOT/services/ensemble-service.ts"
+
 # ── Output ────────────────────────────────────────────────────────────
 total=$(( ${#ok[@]} + ${#failures[@]} ))
 if [ "$JSON" = "1" ]; then

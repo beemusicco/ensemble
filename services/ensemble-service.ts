@@ -29,6 +29,12 @@ import { queryMemories, queryMemoriesSemantic, writeMemory } from '../lib/memory
 import { TAG as LEARN_TAG, weightLearning } from '../lib/auto-learn'
 import * as cognee from '../lib/cognee-bridge'
 import { computeCalibration, recommendRoleAssignments } from '../lib/calibration'
+import {
+  computeCalibration as computeConfidenceCalibration,
+  formatCalibrationFeedback as formatConfidenceFeedback,
+  scanAndPersistClaims,
+  resolveClaimOutcome,
+} from '../lib/confidence-tracker'
 import { readProjectConfigText } from '../lib/project-config'
 import { scanAndAnswerUnknowns, flagAssumptions } from '../lib/unknown-watcher'
 import { scanAndDispatchQuestions, answerQuestion, type AnswerInput, type AnswerResult } from '../lib/question-watcher'
@@ -896,6 +902,7 @@ function buildLearnOnDemandBlock(teamId: string, agentName: string): string {
     `  • [ASSUMPTION: <claim>]                         — flagged in feed; if false, your work is REJECTED`,
     `  • [ASSUMPTION: <claim> ## verify: <bash-cmd>]   — auto-runs the cmd; exit 0 = 🟢 verified, non-zero = 🔴 rejected (treated as NO-GO blocker)`,
     `  • [QUESTION: <ask>]                             — pings operator on Telegram (5min timeout); answer routed back to feed by question-id`,
+    `  • [CONFIDENCE: N% — <claim>]                    — Tetlock-style: attach a probability to any speculative claim. If you say 80%, you should be right ~80% of the time across many claims. Tracked + calibrated over teams. Avoid 90%+ unless you have direct evidence; avoid <30% unless you're red-teaming yourself. The system shows your past calibration in the prompt header — adjust accordingly.`,
     ``,
     `🚨 [QUESTION] is COSTLY — operator answers ~0% of them in production. Use ONLY when:`,
     `  ✓ You cannot proceed without an operator decision (both options valid, only operator knows preference)`,
@@ -943,6 +950,19 @@ function buildChallengeBlock(mode: 'normal' | 'rigorous' | 'sparring'): string {
       `If you agree, say WHY with a specific reason ("worker.ts:142 already covers this" — not "good plan").`,
       `If you disagree, propose THE alternative with reasoning.`,
       `Bias toward finding the second-order bug your teammate missed.`,
+      ``,
+      // W8 counterfactual mandate. Every "we should do X" decision in
+      // rigorous mode now carries an obligation: name Y as the
+      // alternative + forecast outcome of both. This forces real
+      // optionality instead of first-instinct anchoring, and the
+      // forecast carries a [CONFIDENCE: N%] tag that joins the
+      // calibration ledger.
+      `🔁 COUNTERFACTUAL MANDATE — every decision message that proposes "we should do X" MUST include:`,
+      `  1. Y = the strongest alternative (NOT "we could also Z" — Y must be a real competitor on its merits)`,
+      `  2. FORECAST: what observable result do you expect from X vs Y in 3 measurable dimensions (latency / correctness / blast-radius / etc)? Pick metrics, not vibes.`,
+      `  3. [CONFIDENCE: N% — X wins on metric M] — emit a confidence tag. Your past calibration is in the prompt header; calibrate accordingly.`,
+      `  4. PICK: choose X or Y based on the forecast, NOT first-instinct. If the forecast says Y wins, take Y.`,
+      `Skipping the counterfactual = your decision is anchoring, not reasoning. Teammates may reject it on those grounds alone.`,
       ``,
       intermediateCommit,
       `---`,
@@ -1765,8 +1785,24 @@ export function buildPromptPreview(params: {
   const bulletproofBlock = buildBulletproofBlock()
   const learnOnDemandBlock = buildLearnOnDemandBlock(params.teamId, params.agentName)
 
+  // W8: per-agent calibration feedback. If the agent has 10+ resolved
+  // confidence claims in the global memory store, surface their
+  // calibration curve so they self-adjust before claiming.
+  let calibrationBlock = ''
+  try {
+    const program = params.agentName.split('-')[0]
+    const projectScope = currentProjectFromCwd(params.workingDirectory)
+    const curve = computeConfidenceCalibration({ agent: params.agentName, project: projectScope, windowDays: 60 })
+    const fallback = curve.overallSamples < 10
+      ? computeConfidenceCalibration({ agent: program, windowDays: 60 })
+      : curve
+    const fbText = formatConfidenceFeedback(fallback)
+    if (fbText) calibrationBlock = `\n${fbText}\n---\n`
+  } catch { /* non-fatal — calibration is augmentation, never required */ }
+
   return [
     memoriesBlock,
+    calibrationBlock,
     expertBlock,
     challengeBlock,
     bulletproofBlock,

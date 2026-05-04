@@ -310,6 +310,15 @@ detect_template() {
   if echo "$task_lower" | grep -qE '\b(adversarial|red.team|red team|stress.test)\b'; then
     printf 'adversarial'; return
   fi
+  # Hypothesis-test — Popperian falsification protocol. Triggered by
+  # explicit hypothesis/falsification language. Distinct from `debug`
+  # (which fires on bug/fix/error) — hypothesis-test is for CONTESTED
+  # claims where we want to formally distinguish A from not-A via test.
+  # SI roots: `dokaž` (matches dokaži/dokazati/dokazana), `ovrgi`/
+  # `ovržemo` (refute), `hipotez` (matches hipoteza/hipotezo).
+  if echo "$task_lower" | grep -qE '\b(hypothesis.test|falsify|prove.or.disprove|test.claim|popperian|falsification)\b|\b(hipotez|dokaž|ovrg)'; then
+    printf 'hypothesis-test'; return
+  fi
   if echo "$task_lower" | grep -qE '\b(crypto.strategy|trading.strategy|backtest|paper.trading|backtesting)\b'; then
     printf 'crypto-strategy'; return
   fi
@@ -344,7 +353,7 @@ detect_challenge_mode() {
     printf 'sparring'; return
   fi
   case "$2" in
-    premium-quad|ultrareview|pentest|adversarial|crypto-strategy|debug|alien-thinking)
+    premium-quad|ultrareview|pentest|adversarial|crypto-strategy|debug|alien-thinking|hypothesis-test)
       printf 'rigorous'; return ;;
   esac
   printf 'normal'

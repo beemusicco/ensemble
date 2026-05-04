@@ -243,12 +243,28 @@ export async function scanAndAnswerUnknowns(
 export async function flagAssumptions(
   teamId: string,
   sinceTimestamp?: string,
-  opts: { verifyCwd?: string; verifyTimeoutMs?: number } = {},
+  opts: { verifyCwd?: string; verifyTimeoutMs?: number; project?: string } = {},
 ): Promise<number> {
   const messages = getMessages(teamId, sinceTimestamp)
   let flagged = 0
   for (const m of messages) {
     if (!m.from || m.from === 'ensemble' || !m.content) continue
+
+    // W8: capture any [CONFIDENCE: N%] claims in this message before
+    // processing assumptions. Confidence claims persist for later
+    // resolution + per-agent calibration tracking.
+    try {
+      const { scanAndPersistClaims } = await import('./confidence-tracker')
+      const confKey = `confidence::${teamId}::${m.id}`
+      if (!answeredCache.has(confKey)) {
+        scanAndPersistClaims(m.content, m.from, {
+          teamId,
+          project: opts.project,
+        })
+        answeredCache.add(confKey)
+      }
+    } catch { /* non-fatal */ }
+
     const tags = findTags(m.content, 'ASSUMPTION', { maxBodyChars: ASSUMPTION_BODY_MAX })
     for (const t of tags) {
       const raw = t.body
