@@ -15,7 +15,8 @@
           "focus": "Analyze the code for bugs, security issues, performance problems, and improvement opportunities. Challenge assumptions and suggest concrete fixes with code examples.",
           "expert": "michael-feathers"
         }
-      ]
+      ],
+      "default_agents": "claude,codex"
     },
     "implement": {
       "name": "Implementation",
@@ -32,7 +33,8 @@
           "focus": "Write the implementation code and tests based on the architect's plan. Report progress after each step, surface blockers quickly, and ensure all tests pass before marking complete.",
           "expert": "steve-mcconnell"
         }
-      ]
+      ],
+      "default_agents": "claude,codex"
     },
     "research": {
       "name": "Research",
@@ -49,7 +51,8 @@
           "focus": "Independently research the topic from an ecosystem/alternatives angle. Focus on available tools, libraries, best practices, community patterns, and real-world usage. Share your findings for comparison.",
           "expert": "philip-tetlock"
         }
-      ]
+      ],
+      "default_agents": "claude,codex"
     },
     "debug": {
       "name": "Debug",
@@ -66,7 +69,8 @@
           "focus": "Analyze the root cause of the bug. Read relevant code paths, trace the execution flow, identify where the logic breaks down. Propose and implement a fix once the reproducer confirms the bug.",
           "expert": "w-edwards-deming"
         }
-      ]
+      ],
+      "default_agents": "codex,claude"
     },
     "adversarial": {
       "name": "Adversarial Review",
@@ -83,7 +87,8 @@
           "focus": "Your ONLY job is to find bugs, edge cases, and failures. Write tests that break the builder's code. Check race conditions, boundary values, error handling, security. Never approve until you've tried at least 10 attack vectors. Be ruthless.",
           "expert": "karl-popper"
         }
-      ]
+      ],
+      "default_agents": "claude,codex"
     },
     "crypto-strategy": {
       "name": "Crypto Strategy Development",
@@ -100,7 +105,8 @@
           "focus": "Backtest the quant's strategy. Run scripts/backtest/test_correctness.py. Check for overfitting, survivorship bias, fee assumptions. Challenge every assumption. Only approve if Sharpe > 1.0 and profit factor > 1.2 on out-of-sample data.",
           "expert": "nassim-taleb"
         }
-      ]
+      ],
+      "default_agents": "claude,codex"
     },
     "deep-research": {
       "name": "Deep Research with Convergence",
@@ -117,7 +123,8 @@
           "focus": "Research from secondary sources: papers, forums, community, real-world examples. Focus on CONTEXT and PATTERNS. Share numbered findings. After comparing with primary researcher, challenge any finding that lacks evidence. Only CONFIRMED findings go into final report.",
           "expert": "carl-sagan"
         }
-      ]
+      ],
+      "default_agents": "claude,codex"
     },
     "ultrareview": {
       "name": "Ultra Review (4-Agent Security Pass)",
@@ -144,7 +151,8 @@
           "focus": "Consolidate findings from the other three, resolve contradictions, and give an explicit GO / NO-GO verdict with justification. Never green-light unresolved HIGH severity items.",
           "expert": "julia-galef"
         }
-      ]
+      ],
+      "default_agents": "claude,codex,sonnet,codex-mini"
     },
     "premium-quad": {
       "name": "Premium Quad (Critical / Live-Deploy)",
@@ -171,7 +179,8 @@
           "focus": "Independent final gate. Read the complete diff with fresh eyes, demand evidence for risky claims, and give an explicit YES / NO verdict with one-line justification.",
           "expert": "w-edwards-deming"
         }
-      ]
+      ],
+      "default_agents": "claude,sonnet,codex,codex-mini"
     },
     "audit-only": {
       "name": "Audit Only (Read-Only Sweep)",
@@ -193,7 +202,8 @@
           "focus": "READ-ONLY MODE — no file edits, no commits, no mutating commands. Consolidate MAPPER's inventory + ANALYST's findings into a deliverable fix-list the operator can hand off to a manual implementation pass. Format: numbered action items with file:line, severity, suggested fix sketch, and estimated edit scope. Reject any item that lacks a concrete fix sketch — the goal is actionable, not philosophical. Save the doc as docs/AUDIT_<topic>.md before team-done.",
           "expert": "katie-moussouris"
         }
-      ]
+      ],
+      "default_agents": "claude,sonnet,codex"
     },
     "pentest": {
       "name": "Penetration Test (Authorized Targets Only)",
@@ -215,7 +225,8 @@
           "focus": "Validate every EXPLOITER finding in a clean environment — re-run the PoC, confirm reproduction, reject false positives explicitly. Score severity using CVSS v3 with environmental adjustment for this system's actual deployment (auth model, data sensitivity, exposure). For each confirmed finding: write a one-line root cause, the surgical fix (line refs / sanitizer / header / ACL change), the verification command the defender runs to confirm the fix worked, and a regression test recommendation. Output is a prioritized findings document the user can hand to a developer. Never sign off on Critical/High without a fix recommendation. List `targets_tested` and `out_of_scope_skipped` in the final report so scope is auditable.",
           "expert": "katie-moussouris"
         }
-      ]
+      ],
+      "default_agents": "claude,codex,haiku"
     },
     "monte-carlo": {
       "name": "Monte Carlo Simulation (quantitative uncertainty + sensitivity)",
@@ -242,7 +253,8 @@
           "focus": "Your job is REJECT WEAK MC SETUPS. Adversarial review of the entire pipeline:\n\n  1. Each parameter distribution: is it grounded in EVIDENCE or is it a vibes-distribution? Demand cites for non-trivial choices.\n\n  2. Independence assumptions: are inputs really independent, or are there hidden correlations? (Most common failure: assuming slippage independent of volatility — they're correlated.)\n\n  3. Distribution tails: is the chosen family fat-tailed enough? Real markets have power-law tails, not Gaussian. Reject normal-distribution assumptions for financial returns; demand log-normal or t-distribution.\n\n  4. Selection bias: was the historical data filtered in a way that biases the empirical distribution? (e.g. backtesting on assets that survived to today = survivorship bias)\n\n  5. Endpoint sensitivity: did SIMULATOR run with N=100 vs N=10000? If results change materially, N is too small.\n\n  6. EMIT [CONFIDENCE: N% — sim is robust] OR [CONFIDENCE: N% — sim has critical flaw at <step>] (W8 calibration). If your confidence is below 60%, BLOCK the [SIGNAL_COMPLETE] until issues addressed.",
           "expert": "nassim-taleb"
         }
-      ]
+      ],
+      "default_agents": "codex,claude,sonnet,codex-mini"
     },
     "causal-dag": {
       "name": "Causal DAG Analysis (Pearl do-calculus, separate cause from correlation)",
@@ -264,7 +276,8 @@
           "focus": "Your job is DESIGN THE INTERVENTION. Given DAG-BUILDER's structure + CONFOUNDER-HUNTER's identification strategy:\n\n  1. PICK STRATEGY: do we run a randomized experiment (gold standard), use an instrumental variable, do propensity matching, or use front-door criterion? Justify with the DAG.\n\n  2. SPECIFY THE INTERVENTION CONCRETELY:\n     • What gets changed (file:line, config key, feature flag)\n     • What gets measured (metric, query, dashboard)\n     • Sample size required (use power analysis: target effect / variance)\n     • Duration\n     • Rollback criteria\n\n  3. PRE-REGISTER your analysis plan. State BEFORE seeing the data: 'we will declare X causes Y if and only if [specific test result]'. This prevents post-hoc p-hacking.\n\n  4. ESTIMATE EFFECT SIZE under both null (X has no effect) and alt (X has expected effect) hypothesis. If they're indistinguishable at your sample size, the experiment is underpowered — go back to MODELER.\n\n  5. RUN the intervention if scope allows; record results.\n\n  6. EMIT [CONFIDENCE: N% — intervention design will produce identifiable causal estimate].",
           "expert": "donald-rubin"
         }
-      ]
+      ],
+      "default_agents": "claude,sonnet,codex"
     },
     "reference-class": {
       "name": "Reference Class Forecasting (Kahneman outside view, beats inside-view bias)",
@@ -286,7 +299,8 @@
           "focus": "Your job is REASONABLE ADJUSTMENT. Given outside view from BASE-RATE-COMPUTER:\n\n  1. IDENTIFY adjustments: are there REAL differences between this case and the reference class that justify deviating from the base rate? Examples: better team, better timing, better tech. Each adjustment must be quantified — '+10% because of stronger founder-market fit'.\n\n  2. CAP TOTAL ADJUSTMENT: aggregate adjustment must not exceed 20pp from base rate. Larger swings are nearly always inside-view rationalizations. If you find yourself moving the prediction by 40+ percentage points, you're back in inside-view.\n\n  3. STATE FINAL PREDICTION: base rate (X%) + net adjustment (+Y pp) = final estimate (X+Y%). Show the math.\n\n  4. PROVIDE FALSIFICATION: what observation by what date would prove this prediction wrong? (e.g. 'if libro mobile has fewer than 30 active accounts by 60 days, the outside view was right and we shouldn't adjust further.')\n\n  5. EMIT [CONFIDENCE: N% — final estimate], tied to the historical CI and adjustment justifications. Honest confidence: usually within 60-80% range; vibes-confidence: 90%+.",
           "expert": "julia-galef"
         }
-      ]
+      ],
+      "default_agents": "claude,sonnet,codex"
     },
     "hypothesis-test": {
       "name": "Hypothesis Test (Popperian falsification protocol)",
@@ -308,7 +322,8 @@
           "focus": "Your job is EXECUTE THE TESTS. For each `[ASSUMPTION: ## verify:]` the FALSIFIER produced:\n\n  1. EXECUTE the verify command. Report stdout/stderr exactly. If it timed out, redesign with the FALSIFIER (e.g. tighter pytest selection, smaller scope).\n\n  2. RECORD THE OUTCOME: which side won? CLAIM, COUNTER, or INCONCLUSIVE.\n\n  3. UPDATE the calibration ledger: when an outcome resolves a [CONFIDENCE] claim, run /Users/aimusic/.openclaw/tools/ensemble/scripts/resolve-claim.ts with --id and --outcome so the ledger updates. (Operator can also do this manually post-hoc.)\n\n  4. WRITE THE LEARNING: what did the resolved hypothesis teach us about the codebase? Output as `[ASSUMPTION: <stronger version> ## verify: <cmd>]` — feeds back into next iteration.\n\nIf an experiment is inconclusive, do NOT declare a winner. Inconclusive is a valid output. The system trusts you.",
           "expert": "donald-knuth"
         }
-      ]
+      ],
+      "default_agents": "claude,sonnet,codex"
     },
     "alien-thinking": {
       "name": "Alien Thinking (INVENTION-PROTOCOL deployment, 19 tools enforced)",
@@ -330,7 +345,8 @@
           "focus": "FIRST ACTION — read ~/.openclaw/workspace/INVENTION-PROTOCOL.md (Phase 3 + Phase 4 + Pre-mortem + Second-order thinking + Via Negativa sections). Your output MUST execute these named tools, in this order:\n\n  1. PRE-MORTEM (FMEA-structured) — assume the picked approach has ALREADY FAILED, 2 weeks from now. List 5 reasons WHY in a TABLE with 4 columns:\n     | failure mode | severity (1-10) | likelihood (1-10) | detectability (1-10) | RPN = S×L×D |\n     RPN > 100 means MUST be prevented. RPN 50-100 means accept-or-mitigate. <50 = monitor only. Sort by RPN desc and address top-3 before building. This is FMEA — Failure Mode and Effects Analysis from aerospace / pharma / automotive — strictly more rigorous than free-form pre-mortem.\n\n  2. SECOND-ORDER CHAIN — for the picked approach, write 3 'and then what?' lines:\n     • Direct effect: building this means X happens.\n     • Second-order: X means Y for resources / behavior / trust.\n     • Third-order: Y means Z for the system as a whole.\n     If Z is bad, the picked approach is wrong even if Y looks fine. Most damage is at second/third order — where humans don't look.\n\n  3. VIA NEGATIVA CHECK (Taleb) — before you build ANYTHING, ask explicitly: can we solve this by REMOVING something instead of adding? List 3 candidates for removal. Often the right answer is subtraction. Reject the addition default.\n\n  4. SCORE TOP 3 — table with rows: solves-core / speed / reliability / novelty / maintenance / failure-risk / start-small. Don't pick on a single dimension; pick on the worst-case scenario the table reveals.\n\n  5. 10X TEST — is this approach 10x better than the obvious one (faster, cheaper, more data, simpler), or just 10% better? If only 10%, REJECT it and return to diverger — invention without measurable advantage wastes time.\n\n  6. PROVE IT — build the smallest possible test (30-min limit). If feasibility fails, name the EXACT failure mode and return to diverger. Don't ship anything that hasn't passed a real proof — 'sounds plausible' is the human default that costs money in production. Final output: chosen approach name + proof-of-concept artifact path + the FMEA table with mitigations + the second-order chain.\n\n  FORBIDDEN — these are human defaults you must NOT use:\n    ✗ 'Let's just go with this'  ✗ skipping pre-mortem because the idea feels solid  ✗ optimizing inside the chosen approach without confirming 10x  ✗ falling in love with novelty for its own sake  ✗ hand-waving 'we'll handle that later' on second-order risks  ✗ free-form pre-mortem without FMEA RPN scoring (severity × likelihood × detectability) — without numbers, you'll prevent the wrong things.",
           "expert": "richard-feynman"
         }
-      ]
+      ],
+      "default_agents": "sonnet,claude,codex"
     },
     "thinking": {
       "name": "Thinking Mode (structured hypothesis → evidence → decision)",
@@ -347,7 +363,8 @@
           "focus": "Own the critique. Actively challenge every hypothesis the investigator proposes (team-think challenge). Demand evidence. Propose competing hypotheses. Only agree to a decision after the evidence is strong enough that you would bet on it. Your job is to prevent groupthink, not to agree.",
           "expert": "karl-popper"
         }
-      ]
+      ],
+      "default_agents": "claude,codex"
     }
   }
 }

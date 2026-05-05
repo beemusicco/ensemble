@@ -360,6 +360,19 @@ detect_template() {
 }
 TEMPLATE_NAME="$(detect_template "$TASK")"
 
+# ─── Resolve default agents from template (FUTURE-N primitive) ───
+# When the caller (skill / operator) didn't pre-decide AGENTS, look up the
+# template's `default_agents` field in collab-templates.json. This makes
+# template→agents a single source of truth: adding a new template only
+# requires a JSON edit. Explicit AGENTS arg ALWAYS wins (operator override
+# preserved). When no template fired, fall back to the daily-driver triple.
+if [ -z "$AGENTS" ] && [ -n "$TEMPLATE_NAME" ]; then
+  AGENTS=$("$SCRIPT_DIR/get-template-agents.sh" "$TEMPLATE_NAME" --fallback "claude,codex,haiku" 2>/dev/null || echo "claude,codex,haiku")
+fi
+if [ -z "$AGENTS" ]; then
+  AGENTS="claude,codex,haiku"
+fi
+
 # Challenge mode auto-pick. Priority:
 #   1. CLI override (positional arg 6 OR COLLAB_CHALLENGE / ENSEMBLE_CHALLENGE_MODE env)
 #   2. Explicit keyword in task: sparring|podjebavanje|nemiri|adversarial.heat → sparring
