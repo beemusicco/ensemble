@@ -365,12 +365,22 @@ TEMPLATE_NAME="$(detect_template "$TASK")"
 # template's `default_agents` field in collab-templates.json. This makes
 # template→agents a single source of truth: adding a new template only
 # requires a JSON edit. Explicit AGENTS arg ALWAYS wins (operator override
-# preserved). When no template fired, fall back to the daily-driver triple.
+# preserved).
+#
+# Iron rule: haiku spawns ONLY via explicit declaration — either through
+# a template's `default_agents` (currently only `pentest` where haiku IS
+# the Verify role) OR an operator-passed AGENTS arg with haiku in it.
+# Auto-fallback for unmatched tasks must NOT include haiku, because shallow
+# reasoning would consume one of three slots without contributing.
+# Production driver (2026-05-05): unmatched "cleanup pass" task spawned the
+# old `claude,codex,haiku` fallback, but haiku had no test-runner role to
+# play — pure waste. New fallback: 2-agent reasoning pair.
+FALLBACK_AGENTS="claude,codex"
 if [ -z "$AGENTS" ] && [ -n "$TEMPLATE_NAME" ]; then
-  AGENTS=$("$SCRIPT_DIR/get-template-agents.sh" "$TEMPLATE_NAME" --fallback "claude,codex,haiku" 2>/dev/null || echo "claude,codex,haiku")
+  AGENTS=$("$SCRIPT_DIR/get-template-agents.sh" "$TEMPLATE_NAME" --fallback "$FALLBACK_AGENTS" 2>/dev/null || echo "$FALLBACK_AGENTS")
 fi
 if [ -z "$AGENTS" ]; then
-  AGENTS="claude,codex,haiku"
+  AGENTS="$FALLBACK_AGENTS"
 fi
 
 # Challenge mode auto-pick. Priority:
