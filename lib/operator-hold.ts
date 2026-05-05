@@ -33,7 +33,15 @@ export interface HoldDetection {
 
 // Multi-language detection patterns. Operator can write in SI or EN; both
 // must reach the same flag. Patterns are intentionally specific — generic
-// words like "stop" or "wait" would false-positive on technical content.
+// declarative phrases like "operator decides" or "human decides" false-fire
+// on review-style language ("operator decides which feature to ship next",
+// "human decides whether to merge"), so they were dropped 2026-05-05 after
+// a DEEP RESEARCH collab silently held for 36+ minutes on a single
+// post-collab review sentence ("Operator decides which to implement").
+//
+// Iron rule for hold patterns: only IMPERATIVE / DIRECTIVE forms count. The
+// operator must be telling the *team* not to disband, not describing a
+// post-collab decision flow.
 //
 // Unicode-aware boundaries: `\b` in JS is ASCII-only, so it breaks for words
 // starting with `č`, `š`, `ž`. We use Unicode property escapes (`\p{L}` =
@@ -42,22 +50,22 @@ export interface HoldDetection {
 const NB = '(?:^|(?<=[^\\p{L}]))'        // start or after non-letter
 const NA = '(?=[^\\p{L}]|$)'             // end or before non-letter
 const HOLD_PATTERNS: Array<{ name: string; regex: RegExp }> = [
-  // Slovenian
+  // Slovenian — imperatives / explicit hold-on-team directives
   { name: 'si:ne-disband', regex: new RegExp(`${NB}ne\\s+disband[-\\s]?ajte?${NA}`, 'iu') },
   { name: 'si:ne-razpust', regex: new RegExp(`${NB}ne\\s+razpust(i|ite)${NA}`, 'iu') },
   { name: 'si:mirujte', regex: new RegExp(`${NB}miruj(te)?${NA}`, 'iu') },
   { name: 'si:cakaj-na', regex: new RegExp(`${NB}čak(am|aj(te)?|amo)\\s+na\\s+(mene|operatorja|človeka|Sama)`, 'iu') },
-  { name: 'si:clovek-odloca', regex: new RegExp(`${NB}človek\\s+(se\\s+)?odloč`, 'iu') },
-  { name: 'si:operator-odloca', regex: new RegExp(`${NB}operator\\s+(se\\s+)?odloč`, 'iu') },
-  // English (ASCII-only, plain \b is fine)
+  // English — imperatives only
   { name: 'en:do-not-disband', regex: /\bdo\s+not\s+(auto[-\s]?)?disband\b/i },
   { name: 'en:wait-for-human', regex: /\bwait\s+for\s+(human|operator|me)\b/i },
   { name: 'en:hold-position', regex: /\bhold\s+position\b/i },
   { name: 'en:hold-for-review', regex: /\bhold\s+for\s+review\b/i },
-  { name: 'en:human-decides', regex: /\bhuman\s+decides\b/i },
-  { name: 'en:operator-decides', regex: /\boperator\s+decides\b/i },
   // Self-describing inline marker — operator drops [HOLD] in their task text
   { name: 'marker:hold', regex: /\[HOLD\]|\[HOLD-FOR-OPERATOR\]/ },
+  // Removed (2026-05-05): si:clovek-odloca, si:operator-odloca, en:human-decides,
+  // en:operator-decides — declarative forms with too-broad recall. Operators
+  // who genuinely want a hold use one of the imperative patterns above OR
+  // the explicit [HOLD] marker.
 ]
 
 // Strip code blocks and inline code so a `\bdo not disband\b` mentioned in

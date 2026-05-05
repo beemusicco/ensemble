@@ -21,8 +21,12 @@ describe('detectOperatorHold — Slovenian patterns', () => {
     expect(detectOperatorHold('čakajte na človeka').hold).toBe(true)
   })
 
-  it('matches "človek odloča"', () => {
-    expect(detectOperatorHold('Človek se odloči.').hold).toBe(true)
+  it('does NOT match declarative "človek odloča" / "operator odloča"', () => {
+    // 2026-05-05: dropped — too-broad recall (matches review descriptions
+    // like "operator odloča kateri PR merg-amo"). Operators wanting genuine
+    // hold use imperatives (`mirujte`, `čakam na operatorja`) or [HOLD].
+    expect(detectOperatorHold('Človek se odloči.').hold).toBe(false)
+    expect(detectOperatorHold('Operator odloča kateri PR.').hold).toBe(false)
   })
 })
 
@@ -42,9 +46,14 @@ describe('detectOperatorHold — English patterns', () => {
     expect(detectOperatorHold('Then hold for review.').hold).toBe(true)
   })
 
-  it('matches "human decides" / "operator decides"', () => {
-    expect(detectOperatorHold('Human decides on merge.').hold).toBe(true)
-    expect(detectOperatorHold('operator decides').hold).toBe(true)
+  it('does NOT match declarative "human decides" / "operator decides"', () => {
+    // 2026-05-05: dropped — too-broad recall on review-style descriptions like
+    // "Operator decides which feature to implement next." Genuine hold intent
+    // uses imperatives ("wait for human", "do not disband", "hold position")
+    // or the explicit [HOLD] marker.
+    expect(detectOperatorHold('Human decides on merge.').hold).toBe(false)
+    expect(detectOperatorHold('operator decides which to implement').hold).toBe(false)
+    expect(detectOperatorHold('NO production code yet — research + POC only. Operator decides which to implement.').hold).toBe(false)
   })
 
   it('matches the inline [HOLD] marker', () => {
@@ -83,7 +92,7 @@ describe('detectOperatorHold — false-positive resistance', () => {
   })
 
   it('ignores patterns inside markdown blockquotes', () => {
-    const text = ['Background quoted from past convo:', '> human decides', 'Now do the work.'].join('\n')
+    const text = ['Background quoted from past convo:', '> wait for human', 'Now do the work.'].join('\n')
     expect(detectOperatorHold(text).hold).toBe(false)
   })
 
