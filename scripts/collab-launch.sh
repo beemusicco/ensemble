@@ -528,13 +528,31 @@ write_state() {
 }
 write_state "creating"
 
-# ─── Shared latest-team-id: per-launcher-PID file (zero race) + global fallback ───
-# Parent that invoked this script as a subprocess should read /tmp/collab-team-$PPID.txt
-# to get its OWN team-id, not a concurrent launch's. Global /tmp/collab-team-id.txt
-# kept for backward compat but atomically written.
+# ─── Shared latest-team-id files — three slots, picked by readers in priority order ───
+# Per-pane file (FIRST PRIORITY for skill readers): one /collab per tmux pane = one
+#   Claude Code session. Survives concurrent collabs across windows / projects.
+# Per-PPID file (SECOND PRIORITY): the bash that invoked us has a stable PID for
+#   the duration of the spawn. Readers that know their PPID get exact attribution.
+# Global file (LAST RESORT, last-spawn-wins): legacy compatibility for tools that
+#   don't track pane / PPID.
+#
+# Production driver: 2026-05-05 — operator's jsQR team got clobbered by a
+# brainai-dashboard /collab from another pane. Single-slot global file gave the
+# wrong team-id post-compact, the skill chased a stale UUID. Per-pane fixes that.
 PARENT_PID="${PPID:-0}"
 PER_PARENT_FILE="/tmp/collab-team-${PARENT_PID}.txt"
 printf '%s\n' "$TEAM_ID" > "$PER_PARENT_FILE"
+
+if [ -n "${TMUX_PANE:-}" ]; then
+  # tmux pane ids look like "%23" — strip the % and any non-safe chars for the
+  # filename. Empty TMUX_PANE (e.g. running outside tmux) skips this slot.
+  PANE_SAFE=$(printf '%s' "${TMUX_PANE#%}" | tr -c 'A-Za-z0-9_-' '_')
+  if [ -n "$PANE_SAFE" ]; then
+    PER_PANE_FILE="/tmp/collab-team-by-pane-${PANE_SAFE}.txt"
+    printf '%s\n' "$TEAM_ID" > "$PER_PANE_FILE"
+  fi
+fi
+
 LATEST_TMP=$(mktemp /tmp/collab-team-id.XXXXXX)
 printf '%s\n' "$TEAM_ID" > "$LATEST_TMP"
 mv -f "$LATEST_TMP" /tmp/collab-team-id.txt

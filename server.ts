@@ -405,6 +405,50 @@ const server = http.createServer(async (req, res) => {
       return json(res, summary, 200, origin)
     }
 
+    // Pending confidence claims: /api/ensemble/claims/pending?agent=&limit=
+    if (path === '/api/ensemble/claims/pending' && method === 'GET') {
+      const agent = url.searchParams.get('agent') || undefined
+      const limitParam = url.searchParams.get('limit')
+      const limit = limitParam ? Math.max(1, Math.min(parseInt(limitParam, 10) || 100, 500)) : 100
+      const claims = queryMemories({
+        scope: 'global',
+        tags: ['confidence-claim', 'outcome:pending'],
+        limit,
+      })
+      const filtered = agent ? claims.filter(c => c.tags.includes(`agent:${agent}`)) : claims
+      const items = filtered.map(c => ({
+        id: c.id,
+        teamId: c.teamId,
+        agent: c.agent,
+        confidence: parseInt((c.tags.find(t => t.startsWith('confidence:')) || 'confidence:').replace('confidence:', ''), 10) || null,
+        claim: c.value,
+        createdAt: c.createdAt,
+      }))
+      return json(res, { count: items.length, claims: items }, 200, origin)
+    }
+
+    // Resolve a confidence claim: POST /api/ensemble/claims/:id/resolve
+    // Body: { outcome: 'verified'|'rejected', evidence?: string, resolvedBy?: string }
+    const claimResolveMatch = path.match(/^\/api\/ensemble\/claims\/([^/]+)\/resolve$/)
+    if (claimResolveMatch && method === 'POST') {
+      let body: Record<string, unknown> = {}
+      try { body = JSON.parse(await readBody(req)) } catch {
+        return json(res, { error: 'Bad Request: malformed JSON' }, 400, origin)
+      }
+      const outcome = body.outcome as 'verified' | 'rejected' | undefined
+      if (outcome !== 'verified' && outcome !== 'rejected') {
+        return json(res, { error: "outcome must be 'verified' or 'rejected'" }, 400, origin)
+      }
+      const { resolveClaimOutcome } = await import('./lib/confidence-tracker')
+      const resolution = resolveClaimOutcome({
+        claimId: claimResolveMatch[1],
+        outcome,
+        evidence: typeof body.evidence === 'string' ? body.evidence : undefined,
+        resolvedBy: typeof body.resolvedBy === 'string' ? body.resolvedBy : 'operator',
+      })
+      return json(res, { resolution }, 200, origin)
+    }
+
     // Agent-callable research: /api/ensemble/research?q=<query>&url=<optional>&format=text|json
     // Aggregates semantic memory + ripgrep over docs + optional WebFetch.
     if (path === '/api/ensemble/research' && method === 'GET') {

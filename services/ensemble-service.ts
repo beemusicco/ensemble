@@ -30,6 +30,11 @@ import { TAG as LEARN_TAG, weightLearning } from '../lib/auto-learn'
 import * as cognee from '../lib/cognee-bridge'
 import { computeCalibration, recommendRoleAssignments } from '../lib/calibration'
 import {
+  getCompletionConfidence as getCompletionConfidenceFromSignals,
+  hasAnyPositiveCompletionSignal,
+  parseBracketTags,
+} from '../lib/completion-signals'
+import {
   computeCalibration as computeConfidenceCalibration,
   formatCalibrationFeedback as formatConfidenceFeedback,
   scanAndPersistClaims,
@@ -86,6 +91,14 @@ function parseEnvMs(name: string, fallback: number): number {
 //   the right ceiling for a true sign-off-without-team-done escape hatch.
 const SINGLE_SIGNAL_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_SINGLE_SIGNAL_IDLE_MS', 600_000)
 const LOW_CONFIDENCE_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_LOW_CONF_IDLE_MS', 1_800_000)
+// Stuck-idle safety net: if the team has emitted ANY positive completion
+// bracket-tag (even non-canonical / unknown shape) and has gone silent past
+// this threshold, escalate to disband. Catches "agents finished, never said
+// the magic [DONE] word" cases like libro-doc-scanner 384fbb38 and jsQR
+// 933f3acc — both shipped real artifacts and went idle ~10h. Keep the
+// threshold above the SINGLE_SIGNAL value so the structured paths still
+// fire first when they apply.
+const STUCK_IDLE_THRESHOLD_MS = parseEnvMs('ENSEMBLE_STUCK_IDLE_MS', 30 * 60 * 1000)
 
 // Max team lifetime — defensive cap. Some teams agree to "stand by silently"
 // instead of calling team-done.sh, leaving the registry pinned to 'active'
@@ -181,29 +194,10 @@ const SOFT_LIFETIME_IDLE_MS = parseEnvMs('ENSEMBLE_SOFT_LIFETIME_IDLE_MS', 15 * 
 // tag (so "Cross-check ok [VERIFY_DONE]" or "wrapped [EXEC_DONE]." matches,
 // but "emit [DONE] when ready" does not). Together these reject bracket tags
 // that an agent quotes from its own role spec without actually sign-off.
-const HIGH_CONFIDENCE_AT_START = [
-  /^\s*\[DONE\]/i,
-  /^\s*\[COMPLETE\]/i,
-  /^\s*\[FINISHED\]/i,
-  /^\s*\[EXEC_DONE\]/i,
-  /^\s*\[VERIFY_DONE\]/i,
-]
-const HIGH_CONFIDENCE_AT_END = [
-  /\[DONE\]\s*[.!,:]?\s*$/i,
-  /\[COMPLETE\]\s*[.!,:]?\s*$/i,
-  /\[FINISHED\]\s*[.!,:]?\s*$/i,
-  /\[EXEC_DONE\]\s*[.!,:]?\s*$/i,
-  /\[VERIFY_DONE\]\s*[.!,:]?\s*$/i,
-]
-// Combined for legacy callers / tests that want a generic bracket presence.
-const HIGH_CONFIDENCE_COMPLETION = [
-  /\[DONE\]/i,
-  /\[COMPLETE\]/i,
-  /\[FINISHED\]/i,
-  /\[EXEC_DONE\]/i,
-  /\[VERIFY_DONE\]/i,
-]
-
+// High-confidence bracket-tag detection has moved to lib/completion-signals.ts
+// (config-driven taxonomy via JSON, line-edge detection, instructional-context
+// suppression). The prose-level low-conf fallback below stays here because it's
+// scoped to the disband-watchdog path and intentionally narrow.
 const LOW_CONFIDENCE_COMPLETION = [
   /(?:^|[^\p{L}\p{N}_])afgerond(?:[^\p{L}\p{N}_]|$)/iu,
   /(?:^|[^\p{L}\p{N}_])\bdone\b(?![.\w])/iu,
@@ -266,7 +260,19 @@ class EnsembleService {
   }
 
   async checkIdleTeams(): Promise<void> {
-    const teams = loadTeams().filter(team => team.status === 'active')
+    // Watchdog scope: status='active' is the normal path. status='failed' is
+    // ALSO swept when the team still has live agents — that combination means
+    // an early-life error flipped the registry status (createTeam ready-quorum
+    // fail, staged-workflow throw, etc.) but tmux sessions kept running and
+    // the cleanup machinery never fired. Production case: jsQR team 933f3acc
+    // (2026-05-05) finished real work, status was 'failed', agents still
+    // 'active' — invisible to the old filter, never disbanded. Cleanup costs
+    // nothing if there's nothing to do, so the broader filter is safe.
+    const teams = loadTeams().filter(team => {
+      if (team.status === 'active') return true
+      if (team.status === 'failed' && team.agents.some(a => a.status === 'active')) return true
+      return false
+    })
 
     for (const team of teams) {
       // Thinking-mode supervisor runs on every idle tick, independent of
@@ -584,6 +590,24 @@ class EnsembleService {
       return true
     }
 
+    // Stuck-idle safety net (any positive bracket tag + idle > STUCK threshold).
+    // This catches the common "agents finished, emitted [REVIEW_OK]/[GATES_GREEN]/
+    // [VERIFY_DONE]+evidence, then went silent" path that previously sat for
+    // hours because the structured completion-signal heuristics rejected the
+    // signal shape. Operates on the LATEST messages from active agents only —
+    // not on early-life chatter.
+    if (idleForMs > STUCK_IDLE_THRESHOLD_MS) {
+      const lastByAgent = new Map<string, string>()
+      for (const m of nonEnsembleMessages.slice(-30)) {
+        if (!m.from || !activeAgentNames.has(m.from)) continue
+        if (typeof m.content !== 'string') continue
+        lastByAgent.set(m.from, m.content)
+      }
+      for (const content of lastByAgent.values()) {
+        if (hasAnyPositiveCompletionSignal(content)) return true
+      }
+    }
+
     if (idleForMs <= LOW_CONFIDENCE_IDLE_THRESHOLD_MS) return false
     return completionSignals.length >= 1
   }
@@ -592,38 +616,20 @@ class EnsembleService {
     const trimmed = content.trim()
     if (trimmed.length === 0) return null
 
-    // FIX 1: high-conf bracket tags only count as a real sign-off when they
-    // occupy a message EDGE — at the very start (only whitespace before) or
-    // very end (only whitespace + optional terminal punctuation after) — AND
-    // the message is reasonably short (≤300 chars). Real sign-offs:
-    //   "[DONE]"                          (start)
-    //   "[VERIFY_DONE] approved"          (start)
-    //   "Cross-check ok [VERIFY_DONE]"    (end)
-    //   "Implementation wrapped [EXEC_DONE]"  (end)
-    // False positives (now correctly rejected):
-    //   "as instructed I will emit [DONE] when ready"
-    //   "Don't emit [DONE] in text; it is no longer auto-detected"
-    //   "The instructions say to emit [EXEC_DONE] when the patch lands"
-    if (trimmed.length <= 300) {
-      const matchesEdge =
-        HIGH_CONFIDENCE_AT_START.some(p => p.test(trimmed)) ||
-        HIGH_CONFIDENCE_AT_END.some(p => p.test(trimmed))
-      if (matchesEdge) return 'high'
-    }
-    // Anything longer than 300 chars OR with the tag buried mid-prose is
-    // treated as discussion, not a sign-off.
-    if (HIGH_CONFIDENCE_COMPLETION.some(p => p.test(trimmed))) {
-      // Buried — explicitly drop to null (not low) so it doesn't accidentally
-      // match low-conf patterns and creep back into idle-tax disband.
-      return null
-    }
+    // Primary path: config-driven detector in lib/completion-signals.ts.
+    // Owns the tag taxonomy (positive_high / positive_partial / negative)
+    // and the line-edge / instructional / evidence-marker scoring. New tag
+    // forms are added via JSON override at ~/.ensemble/completion-signals.json
+    // — no code change. Replaces the prior 300-char whole-message gate that
+    // silently dropped evidence-laden [VERIFY_DONE] sign-offs.
+    const fromSignals = getCompletionConfidenceFromSignals(trimmed)
+    if (fromSignals !== null) return fromSignals
 
-    // Low-confidence words ("done", "complete", "klaar", "afgerond") are far
-    // too common in productive in-flight messages — "almost done with phase 1",
-    // "done reading paper_trader.py, now wiring tests" — to be treated as
-    // sign-offs. Real wrap-ups are SHORT and END with the keyword. Restrict
-    // matching to: trimmed message ≤200 chars AND keyword present in last 80
-    // chars. Anything else is conversational.
+    // Low-confidence prose fallback (Dutch / English): "done", "klaar",
+    // "afgerond" at the END of a SHORT message (≤200 chars, last 80 chars).
+    // Conservative thresholds — these words appear in productive in-flight
+    // chatter ("almost done with phase 1", "done reading paper_trader.py")
+    // so requiring them to occupy the trailing edge prevents false fires.
     if (trimmed.length > 200) return null
     const tail = trimmed.slice(-80)
     if (LOW_CONFIDENCE_COMPLETION.some(p => p.test(tail))) return 'low'
@@ -2670,6 +2676,60 @@ export async function disbandTeam(
       }
     } catch (err) {
       console.warn(`[Ensemble] Cognee writeback failed for ${teamId.slice(0, 8)}:`, err)
+    }
+  }
+
+  // W8.1: close the calibration loop. Pending [CONFIDENCE: N%] claims sit
+  // forever unless something resolves them. Match each unresolved claim
+  // against `assumption_verified` events from this team's feed by token-
+  // overlap; propagate verify outcome to the claim. Without this the W8
+  // calibration block never has data to inject on next spawn.
+  try {
+    const { resolveLinkedClaimsForTeam } = await import('../lib/claim-resolver')
+    const r = resolveLinkedClaimsForTeam(teamId)
+    if (r.resolved > 0) {
+      appendMessage(teamId, {
+        id: uuidv4(), teamId, from: 'ensemble', to: 'team',
+        content: `📊 Auto-resolved ${r.resolved} confidence claim(s) via assumption-verification text-match (${r.pending} still pending — operator can resolve via /api/ensemble/claims/:id/resolve).`,
+        type: 'chat', timestamp: new Date().toISOString(),
+        meta: { event: 'claims_auto_resolved', resolved: r.resolved, pending: r.pending },
+      })
+    }
+  } catch (err) {
+    console.warn(`[claim-resolver] failed for ${teamId.slice(0, 8)}: ${(err as Error).message}`)
+  }
+
+  // W4.1: persist a failure-pattern learning when disband reason is non-
+  // completion (watchdog / lifetime-cap / idle-tax / orphaned). Already
+  // covered: cross-agent-overlap (below) and staged-workflow auto_fix
+  // exhaustion. Missing was the bulk of failure-mode disbands. Without
+  // this hook, 158 disbanded teams in 7d produced 0 failure-patterns and
+  // the next team in the same project re-discovered the same dead-end.
+  if (!isDisbandCompletionConfirmed(reason)) {
+    try {
+      const { recordFailureLearning } = await import('../lib/auto-learn')
+      const tail = getMessages(teamId)
+        .filter(m => m.from && m.from !== 'ensemble' && m.content)
+        .slice(-3)
+        .map(m => `${m.from}: ${(m.content || '').slice(0, 200)}`)
+        .join('\n')
+      const gateId = (() => {
+        if (reason.startsWith('watchdog:')) return 'watchdog'
+        if (reason.startsWith('lifetime-cap')) return 'lifetime-cap'
+        if (reason.startsWith('soft-cap')) return 'soft-cap'
+        if (reason.startsWith('idle-tax')) return 'idle-tax'
+        if (reason.startsWith('orphaned')) return 'orphaned-spawn'
+        return 'manual-noncompletion'
+      })()
+      recordFailureLearning({
+        teamId,
+        project: team.workingDirectory ? path.basename(team.workingDirectory) : undefined,
+        gateId,
+        errorSignature: `disband-reason="${reason}". last-msgs:\n${tail}`.slice(0, 600),
+        iterationsTried: 0,
+      })
+    } catch (err) {
+      console.warn(`[auto-learn] disband failure-pattern write failed for ${teamId.slice(0, 8)}: ${(err as Error).message}`)
     }
   }
 
