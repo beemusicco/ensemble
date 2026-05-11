@@ -135,8 +135,8 @@ export async function detectCrossAgentOverlap(
   const perAgent: Record<string, string[]> = {}
   for (const { agentName, branch } of agentBranches) {
     try {
-      const { stdout } = await execFileAsync(
-        'git', ['diff', '--name-only', `${baseRef}...${branch}`],
+      const { stdout } = await execGit(
+        ['diff', '--name-only', `${baseRef}...${branch}`],
         { cwd: basePath },
       )
       perAgent[agentName] = stdout.trim().split('\n').filter(Boolean)
@@ -201,8 +201,8 @@ export async function classifyAgentBranch(
   let deletions = 0
   let filesChanged = 0
   try {
-    const { stdout } = await execFileAsync(
-      'git', ['diff', '--shortstat', `${baseRef}...${branch}`],
+    const { stdout } = await execGit(
+      ['diff', '--shortstat', `${baseRef}...${branch}`],
       { cwd: basePath },
     )
     insertions  = parseInt(stdout.match(/(\d+)\s+insertion/)?.[1] || '0', 10)
@@ -213,8 +213,8 @@ export async function classifyAgentBranch(
   let hasRevertCommit = false
   let commitCount = 0
   try {
-    const { stdout } = await execFileAsync(
-      'git', ['log', '--format=%s%n%b%n----COMMIT-END----', `${baseRef}..${branch}`],
+    const { stdout } = await execGit(
+      ['log', '--format=%s%n%b%n----COMMIT-END----', `${baseRef}..${branch}`],
       { cwd: basePath },
     )
     commitCount = (stdout.match(/----COMMIT-END----/g) || []).length
@@ -338,8 +338,8 @@ export async function mergeWorktree(
 
   // Check if the worktree branch has any commits ahead of target
   try {
-    const { stdout: diffStat } = await execFileAsync(
-      'git', ['diff', '--stat', `${target}...${worktreeInfo.branch}`],
+    const { stdout: diffStat } = await execGit(
+      ['diff', '--stat', `${target}...${worktreeInfo.branch}`],
       { cwd: basePath },
     )
     if (!diffStat.trim()) {
@@ -351,8 +351,7 @@ export async function mergeWorktree(
   }
 
   try {
-    await execFileAsync(
-      'git',
+    await execGit(
       ['merge', worktreeInfo.branch, '--no-ff', '-m', `collab: merge ${worktreeInfo.agentName} work`],
       { cwd: basePath },
     )
@@ -364,8 +363,8 @@ export async function mergeWorktree(
 
     // Get list of conflicted files
     try {
-      const { stdout } = await execFileAsync(
-        'git', ['diff', '--name-only', '--diff-filter=U'],
+      const { stdout } = await execGit(
+        ['diff', '--name-only', '--diff-filter=U'],
         { cwd: basePath },
       )
       const conflicts = stdout.trim().split('\n').filter(Boolean)
@@ -498,8 +497,7 @@ export async function evaluateWorktreeDisposition(input: EvaluateInput): Promise
  */
 export async function uncommittedChanges(worktreePath: string): Promise<string> {
   try {
-    const { stdout } = await execFileAsync(
-      'git',
+    const { stdout } = await execGit(
       ['status', '--porcelain'],
       { cwd: worktreePath },
     )
@@ -554,11 +552,27 @@ export async function destroyWorktree(
  * Get the current branch name for a repo.
  */
 async function getCurrentBranch(repoPath: string): Promise<string> {
-  const { stdout } = await execFileAsync(
-    'git', ['rev-parse', '--abbrev-ref', 'HEAD'],
-    { cwd: repoPath },
-  )
-  return stdout.trim()
+  // Wrapped via execGit so a missing repoPath (e.g. worktree cleaned up
+  // before disband ran) surfaces as CWD_MISSING instead of crashing the
+  // entire auto-disband flow. Production case 2026-05-11 team 60c1f6ea —
+  // 'Auto-disband failed: Command failed: git rev-parse --abbrev-ref HEAD'
+  // looped every cycle because this call sat outside the execGit wrapper.
+  try {
+    const { stdout } = await execGit(
+      ['rev-parse', '--abbrev-ref', 'HEAD'],
+      { cwd: repoPath },
+    )
+    return stdout.trim()
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code
+    // CWD missing or repo broken — fall back to 'main' so mergeWorktree
+    // can still skip cleanly via its no-changes path.
+    if (code === 'CWD_MISSING') {
+      console.warn(`[Worktree] getCurrentBranch fallback to 'main': cwd missing at ${repoPath}`)
+      return 'main'
+    }
+    throw err
+  }
 }
 
 /**
@@ -569,8 +583,8 @@ export async function listTeamWorktrees(
   basePath: string,
 ): Promise<WorktreeInfo[]> {
   try {
-    const { stdout } = await execFileAsync(
-      'git', ['worktree', 'list', '--porcelain'],
+    const { stdout } = await execGit(
+      ['worktree', 'list', '--porcelain'],
       { cwd: basePath },
     )
 
