@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import type { AgentRuntime } from './agent-runtime'
+import { SessionGoneError } from './agent-runtime'
 import type { EnsembleMessage, EnsembleTeam } from '../types/ensemble'
 
 const DEFAULT_POLL_INTERVAL_MS = 30_000
@@ -33,6 +34,9 @@ interface AgentWatchdogState {
   lastMessageAt: string
   nudgedAt?: string
   stalledAt?: string
+  /** Set once we've detected the tmux session is gone and announced once.
+   * Prevents the 30s nudge loop from spamming "failed to nudge" forever. */
+  sessionGone?: boolean
 }
 
 interface PairLoopState {
@@ -218,6 +222,7 @@ interface AgentWatchdogDeps {
   loadTeams: () => EnsembleTeam[]
   getMessages: (teamId: string) => EnsembleMessage[]
   appendMessage: (teamId: string, message: EnsembleMessage) => void
+  updateTeam?: (teamId: string, partial: Partial<EnsembleTeam>) => void
   disbandTeam?: (teamId: string, reason: string) => Promise<void>
   getRuntime: () => Pick<AgentRuntime, 'sendKeys' | 'pasteFromFile' | 'capturePane' | 'paneCurrentCommand'>
   resolveAgentProgram: (program: string) => { inputMethod: 'pasteFromFile' | 'sendKeys' }
@@ -466,6 +471,34 @@ export class AgentWatchdog {
             nudgedAt: new Date(nowMs).toISOString(),
           })
         } catch (err) {
+          // SessionGoneError → tmux session is permanently gone. Don't keep
+          // logging "failed to nudge" every poll. Mark agent failed (so T3
+          // crash-detector can respawn), record sessionGone in state to skip
+          // future nudge attempts for this agent until the team is disbanded.
+          // Production case 2026-05-11 team 60c1f6ea — watchdog spammed
+          // "failed to nudge" every 30s for 30+ minutes because catch
+          // swallowed the error without state escalation.
+          if (err instanceof SessionGoneError) {
+            if (!currentState.sessionGone) {
+              // One-shot announce + state-mark
+              this.state.set(stateKey, { ...currentState, sessionGone: true, nudgedAt: new Date(nowMs).toISOString() })
+              this.deps.updateTeam?.(team.id, {
+                agents: team.agents.map(a => a.name === agent.name ? { ...a, status: 'failed' } : a),
+              })
+              this.deps.appendMessage(team.id, {
+                id: uuidv4(),
+                teamId: team.id,
+                from: 'ensemble',
+                to: 'team',
+                content: `💀 Watchdog: tmux session for ${agent.name} is gone — marking failed. T3 auto-respawn will pick up if ENSEMBLE_AUTO_RESPAWN=1; otherwise manual respawn via collab-respawn.sh.`,
+                type: 'chat',
+                timestamp: new Date(nowMs).toISOString(),
+                meta: { event: 'agent_session_gone', agent: agent.name },
+              })
+            }
+            // No matter what, don't keep nudging this dead session.
+            continue
+          }
           const reason = err instanceof Error ? err.message : String(err)
           this.deps.appendMessage(team.id, {
             id: uuidv4(),

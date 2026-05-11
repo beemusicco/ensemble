@@ -96,6 +96,58 @@ describe('AgentWatchdog', () => {
     })
   }
 
+  it('marks agent failed once + skips future nudges when tmux session is gone (regression 60c1f6ea 2026-05-11)', async () => {
+    const { SessionGoneError } = await import('../lib/agent-runtime')
+    pasteFromFile.mockImplementation(async (session: string) => {
+      throw new SessionGoneError(session)
+    })
+    const updates: Array<{ teamId: string; partial: Partial<EnsembleTeam> }> = []
+    const watchdog = new AgentWatchdog({
+      loadTeams: () => teams,
+      getMessages: () => messages,
+      appendMessage: (_teamId, message) => appended.push(message),
+      updateTeam: (teamId, partial) => {
+        updates.push({ teamId, partial })
+        // Reflect the update in the in-memory teams array so next poll sees it
+        const idx = teams.findIndex(t => t.id === teamId)
+        if (idx >= 0) teams[idx] = { ...teams[idx], ...partial } as EnsembleTeam
+      },
+      getRuntime: () => ({ sendKeys, pasteFromFile, capturePane: vi.fn(async () => '$ '), paneCurrentCommand: vi.fn(async () => '') }),
+      resolveAgentProgram: () => ({ inputMethod: 'pasteFromFile' }),
+      isSelf: () => true,
+      getHostById: () => undefined,
+      postRemoteSessionCommand,
+      collabDeliveryFile: (teamId, sessionName) => `/tmp/${teamId}/${sessionName}.txt`,
+      now: () => nowMs,
+      pollIntervalMs: 60_000,
+      nudgeAfterMs: 90_000,
+      stallAfterMs: 180_000,
+    })
+
+    // First poll: agent already idle long enough → watchdog tries to nudge
+    nowMs += 91_000
+    await watchdog.poll()
+
+    // nudgeAgent appends "👀 Watchdog nudged" before pasting, THEN paste throws
+    // SessionGoneError → our new catch appends the "💀 session gone" announce.
+    expect(updates).toHaveLength(1)
+    expect(updates[0].partial.agents?.[0].status).toBe('failed')
+    expect(appended).toHaveLength(2)
+    expect(appended[0].content).toContain('Watchdog nudged codex-1')
+    expect(appended[1].content).toContain('session for codex-1 is gone')
+    expect(appended[1].meta?.event).toBe('agent_session_gone')
+
+    // Second poll right after: NO new nudge, NO new "failed to nudge" message.
+    // Production case 60c1f6ea: this assertion would fail without the fix — 30s
+    // polls kept logging "❌ Watchdog failed to nudge codex-1" forever.
+    nowMs += 60_000
+    await watchdog.poll()
+    expect(appended).toHaveLength(2)   // still 2, no new spam
+    expect(updates).toHaveLength(1)    // already-failed agents are skipped (status filter)
+
+    watchdog.stop()
+  })
+
   it('nudges an active agent after prolonged silence and logs it to the team feed', async () => {
     const watchdog = createWatchdog()
     await watchdog.poll()

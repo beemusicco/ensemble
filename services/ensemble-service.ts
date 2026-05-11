@@ -18,7 +18,7 @@ import {
 } from '../lib/agent-spawner'
 import { spawnWithRetry, respawnAgent } from '../lib/agent-respawn'
 import { isSelf, getHostById, getSelfHostId } from '../lib/hosts-config'
-import { getRuntime } from '../lib/agent-runtime'
+import { getRuntime, SessionGoneError } from '../lib/agent-runtime'
 import { resolveAgentProgram } from '../lib/agent-config'
 import { AgentWatchdog } from '../lib/agent-watchdog'
 import {
@@ -238,6 +238,7 @@ class EnsembleService {
       loadTeams,
       getMessages: (teamId: string) => getMessages(teamId),
       appendMessage,
+      updateTeam,
       disbandTeam: async (teamId: string, reason: string) => {
         if (this.disbandingTeams.has(teamId)) return
         this.disbandingTeams.add(teamId)
@@ -508,9 +509,52 @@ class EnsembleService {
       if (this.crashedAgentMarkers.has(markerKey)) continue
       try {
         const sessionName = `${team.name}-${agent.name}`
-        const cmd = (await runtime.paneCurrentCommand(sessionName))
-          .toLowerCase()
-          .replace(/\.exe$/, '')
+        let cmd: string
+        try {
+          cmd = (await runtime.paneCurrentCommand(sessionName))
+            .toLowerCase()
+            .replace(/\.exe$/, '')
+        } catch (probeErr) {
+          // SessionGoneError → tmux session vanished entirely. Treat exactly
+          // like a CLI crash: mark failed, trigger T3 respawn if enabled.
+          // Production case 2026-05-11 team 60c1f6ea — 3 agents went missing,
+          // detectCrashedAgents silently retried forever because the outer
+          // catch swallowed the SessionGoneError. Now we distinguish.
+          if (probeErr instanceof SessionGoneError) {
+            if (this.crashedAgentMarkers.has(markerKey)) continue
+            this.crashedAgentMarkers.add(markerKey)
+            updateTeam(team.id, {
+              agents: team.agents.map(a => a.name === agent.name ? { ...a, status: 'failed' } : a),
+            })
+            const autoRespawn = process.env.ENSEMBLE_AUTO_RESPAWN === '1'
+            let respawnNote = `manual respawn needed (POST /api/ensemble/teams/${team.id}/agents/${agent.name}/respawn).`
+            if (autoRespawn) {
+              const freshTeam = getTeam(team.id) || team
+              try {
+                const result = await respawnAgent(freshTeam, agent.name, { reason: 'crash' })
+                if (result.success) {
+                  respawnNote = `auto-respawn succeeded (attempt ${result.attempts}).`
+                  this.crashedAgentMarkers.delete(markerKey)
+                } else {
+                  respawnNote = `auto-respawn skipped/failed (${result.reason}: ${result.error || 'n/a'}). Manual respawn available.`
+                }
+              } catch (err) {
+                const m = err instanceof Error ? err.message : String(err)
+                respawnNote = `auto-respawn threw (${m}).`
+              }
+            }
+            appendMessage(team.id, {
+              id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
+              content: `💀 ${agent.name} session gone (tmux killed externally or disbanded mid-flight). ${respawnNote}`,
+              type: 'chat', timestamp: new Date().toISOString(),
+              meta: { event: 'agent_session_gone', agent: agent.name, auto_respawn: autoRespawn },
+            })
+            console.warn(`[Ensemble] Session gone: team=${team.id.slice(0, 8)} agent=${agent.name}; ${respawnNote}`)
+            continue
+          }
+          // Other introspection errors — silent retry, same as before
+          continue
+        }
         if (cmd && SHELLS.has(cmd)) {
           // CLI exited; pane fell back to parent shell. Mark + warn once.
           this.crashedAgentMarkers.add(markerKey)
