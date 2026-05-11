@@ -14,15 +14,26 @@
 # Without the env, the commit fails with exit 1 and a clear list of violations.
 set -euo pipefail
 
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -z "$REPO_ROOT" ] && exit 0  # not a git repo (shouldn't happen pre-commit)
+
+# ── self-recursion guard (runs FIRST, independent of .collab-protect) ────
+# Detects the "wrap-and-rename" class bug where a refactor's replace_all
+# captures the function's own body. See ~/.openclaw/scripts/check-self-recursion.mjs.
+# Bypass: SELF_RECURSION_BYPASS=1 git commit ...
+SELF_RECURSION_CHECK="$HOME/.openclaw/scripts/check-self-recursion.mjs"
+if [ -z "${SELF_RECURSION_BYPASS:-}" ] && [ -f "$SELF_RECURSION_CHECK" ]; then
+  if ! node "$SELF_RECURSION_CHECK" 1>&2; then
+    exit 1
+  fi
+fi
+
 if [ -n "${COLLAB_PROTECT_BYPASS:-}" ]; then
   exit 0
 fi
 
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-[ -z "$REPO_ROOT" ] && exit 0  # not a git repo (shouldn't happen pre-commit)
-
 PROTECT_FILE="$REPO_ROOT/.collab-protect"
-[ ! -f "$PROTECT_FILE" ] && exit 0  # nothing to enforce
+[ ! -f "$PROTECT_FILE" ] && exit 0  # nothing more to enforce
 
 # Build glob list (skip empty + comments)
 mapfile -t PATTERNS < <(grep -vE '^\s*(#|$)' "$PROTECT_FILE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')

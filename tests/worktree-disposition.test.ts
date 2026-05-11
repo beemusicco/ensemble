@@ -96,4 +96,19 @@ describe('evaluateWorktreeDisposition (W2.5m primitive)', () => {
     // After rename, HEAD points to trunk; worktree HEAD == trunk → destroy
     expect(d.action).toBe('destroy')
   })
+
+  it('PRESERVE-EVAL-ERROR when worktree cwd is missing (no RangeError)', async () => {
+    // Regression: execGit cwd pre-check must turn cryptic ENOENT (or, when an
+    // earlier refactor wrongly self-referenced, RangeError: Maximum call stack
+    // size exceeded) into a clean eval-error preserve. Reproduces the 2026-05-11
+    // production case where 6 disband evals crashed because the worktree dir
+    // was cleaned up between scheduling and execution.
+    fs.rmSync(worktree, { recursive: true, force: true })
+    const d = await evaluateWorktreeDisposition({ worktreePath: worktree, basePath: repo })
+    expect(d.action).toBe('preserve')
+    if (d.action === 'preserve') {
+      expect(d.why).toBe('eval-error')
+      expect(d.detail).toMatch(/cwd does not exist|CWD_MISSING|ENOENT/)
+    }
+  })
 })
