@@ -26,3 +26,29 @@ Thumbs.db
 
 # JSONL persistence files (local data)
 *.jsonl
+
+# Transient artifacts from collab work + design iteration sessions
+# (screenshots, design renders, MCP capture artifacts that pile up in
+# working tree but are never the "WIP" we want to resume)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.svg
+*.heic
+*.bmp
+*.tiff
+*.ico
+
+# Playwright / browser-automation captures
+.playwright-mcp/
+
+# Local benchmark outputs
+bench/results/
+
+# Operator project-config — handled by .claude/settings.local.json upstream
+.claude/
+
+# Misc empty placeholders
+empty-*.json
