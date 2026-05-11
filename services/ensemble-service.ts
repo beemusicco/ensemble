@@ -496,6 +496,9 @@ class EnsembleService {
   // Track which agents we've already flagged as crashed so we don't spam
   // the team feed every 15s tick.
   private readonly crashedAgentMarkers = new Set<string>()
+  /** teamId → last-time-we-logged-bridge-zombie (ms). Throttles repetitive
+   * warn lines for the same team to one entry per 5 minutes. */
+  private readonly bridgeZombieLogTs = new Map<string, number>()
 
   private async detectCrashedAgents(team: EnsembleTeam): Promise<void> {
     const runtime = getRuntime()
@@ -609,7 +612,16 @@ class EnsembleService {
     if (Number.isNaN(lastTimestamp)) return false
 
     const activeAgents = team.agents.filter(agent => agent.status === 'active')
-    if (activeAgents.length === 0) return false
+    if (activeAgents.length === 0) {
+      // All agents failed — usually via watchdog session_gone or crash
+      // detection that's marked every agent. Without explicit disband, the
+      // team stays status=active forever, polluting drift checks and log
+      // streams every tick. Trigger auto-disband to clean registry.
+      // Production case 2026-05-11 team 60c1f6ea: all 3 agents transitioned
+      // to failed but team stayed active for 40+ min until manual cleanup.
+      console.warn(`[Ensemble] All ${team.agents.length} agents failed in team ${team.id.slice(0, 8)} — triggering auto-disband`)
+      return true
+    }
 
     // Bridge-zombie guard: if ensemble-bridge.sh has died but agents are still
     // writing to messages.jsonl, the registry lastTimestamp freezes at the
@@ -623,7 +635,13 @@ class EnsembleService {
       const stat = fs.statSync(collabMessagesFile(team.id))
       const fileMtime = stat.mtimeMs
       if (fileMtime - lastTimestamp > 10_000) {
-        console.warn(`[Ensemble] Bridge-zombie detected for team ${team.id}: file mtime ${Math.round((fileMtime - lastTimestamp) / 1000)}s ahead of registry — using file mtime`)
+        // Throttle: log once per team per 5 minutes (instead of every 30s poll).
+        // Behavior unchanged — we still always trust file mtime when ahead.
+        const lastLog = this.bridgeZombieLogTs.get(team.id) ?? 0
+        if (Date.now() - lastLog > 5 * 60 * 1000) {
+          console.warn(`[Ensemble] Bridge-zombie detected for team ${team.id}: file mtime ${Math.round((fileMtime - lastTimestamp) / 1000)}s ahead of registry — using file mtime`)
+          this.bridgeZombieLogTs.set(team.id, Date.now())
+        }
         effectiveLastTimestamp = fileMtime
       }
     } catch { /* file may not exist yet */ }
