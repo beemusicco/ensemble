@@ -1429,6 +1429,13 @@ async function collectAgentReflections(team: EnsembleTeam): Promise<void> {
         console.log(`[Ensemble] Reflection: saved ${saved} entries from ${agent.name}`)
       }
     } catch (err) {
+      // SessionGoneError is the expected case when the agent's tmux session
+      // was already torn down before reflection ran (common: post-disband or
+      // mid-flight crash). Demote to debug — warn-spam was 30+ lines on
+      // team 60c1f6ea 2026-05-11.
+      if (err instanceof SessionGoneError) {
+        return
+      }
       console.warn(`[Ensemble] Reflection failed for ${agent.name}:`, err)
     }
   }))
