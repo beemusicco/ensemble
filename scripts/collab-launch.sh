@@ -14,6 +14,27 @@ AUTH_HDR="$(ensemble_auth_header || true)"
 CWD="${1:-.}"
 TASK="${2:?Usage: collab-launch.sh <cwd> <task>}"
 
+# ── BLOCKER-VETO + TOOLCHAIN prepend (reaches codex too — codex doesn't receive Claude hooks) ──
+# Idempotent: only prepend if marker not already in TASK.
+# Reason: 2026-05-07 Shopsy K1 — agent declared "physical login obvezen, structural limit"
+# while shopsy_capture_token.py (Playwright + keychain) sat in backend/app/scripts/.
+# Class-bug: every new primitive (auto-install, /think, retro, calibration, ...) needs
+# to reach codex agents. Generated prepend at ~/.openclaw/tools/ensemble/scripts/collab-prepend.sh
+# lists ALL toolchain primitives; future primitives update THAT file, not this one.
+if [[ "$TASK" != *"BLOCKER-VETO"* ]]; then
+  PREPEND_FILE="$SCRIPT_DIR/collab-prepend.sh"
+  if [ -x "$PREPEND_FILE" ]; then
+    PREPEND="$(bash "$PREPEND_FILE")"
+  else
+    # fallback minimal prepend if collab-prepend.sh missing
+    PREPEND="🚨 BLOCKER-VETO: run python3 ~/.openclaw/scripts/discover-tools.py <domain> before claiming blocker. See ~/.openclaw/workspace/DEBUG-PROTOCOL.md Phase 2.7.
+
+────── ORIGINAL TASK ──────"
+  fi
+  TASK="${PREPEND}
+${TASK}"
+fi
+
 # Smart CWD: if the task mentions a known project path, use that as CWD
 # so agents start in the right directory with correct sandbox access.
 #
@@ -359,6 +380,41 @@ detect_template() {
   printf ''
 }
 TEMPLATE_NAME="$(detect_template "$TASK")"
+
+# Semantic router fallback — when keyword detection found nothing,
+# delegate to route-template.sh which falls back to Haiku LLM classifier.
+# Operator's mental model: "I describe my task in natural language;
+# system picks the right template without me having to type magic keywords."
+# Override: ENSEMBLE_DISABLE_SEMANTIC_ROUTER=1 to skip LLM stage.
+ROUTER_REASONING=""
+ROUTER_SOURCE=""
+if [ -z "$TEMPLATE_NAME" ] && [ "${ENSEMBLE_DISABLE_SEMANTIC_ROUTER:-0}" != "1" ]; then
+  if [ -x "$HOME/.openclaw/scripts/route-template.sh" ]; then
+    ROUTER_OUT=$("$HOME/.openclaw/scripts/route-template.sh" "$TASK" 2>/dev/null || echo "")
+    if [ -n "$ROUTER_OUT" ]; then
+      ROUTED_TEMPLATE=$(echo "$ROUTER_OUT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read() or '{}'); print(d.get('template',''))" 2>/dev/null)
+      ROUTED_MODE=$(echo "$ROUTER_OUT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read() or '{}'); print(d.get('challenge_mode',''))" 2>/dev/null)
+      ROUTER_REASONING=$(echo "$ROUTER_OUT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read() or '{}'); print(d.get('reasoning',''))" 2>/dev/null)
+      ROUTER_SOURCE=$(echo "$ROUTER_OUT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read() or '{}'); print(d.get('source',''))" 2>/dev/null)
+      if [ -n "$ROUTED_TEMPLATE" ] && [ "$ROUTED_TEMPLATE" != "implement" ]; then
+        TEMPLATE_NAME="$ROUTED_TEMPLATE"
+        # If router suggested a challenge_mode, propagate it (unless operator override exists)
+        if [ -n "$ROUTED_MODE" ] && [ -z "${CHALLENGE_OVERRIDE:-}" ]; then
+          CHALLENGE_OVERRIDE="$ROUTED_MODE"
+        fi
+        echo -e "  \033[36m🎯 Auto-routed:\033[0m $TEMPLATE_NAME (mode=$ROUTED_MODE)" >&2
+        echo -e "     \033[2mreasoning: $ROUTER_REASONING\033[0m" >&2
+        echo -e "     \033[2msource: $ROUTER_SOURCE\033[0m" >&2
+        # 2-second abort window — operator can Ctrl-C if route is wrong.
+        # Override: ENSEMBLE_NO_ROUTE_PAUSE=1 to skip pause.
+        if [ "${ENSEMBLE_NO_ROUTE_PAUSE:-0}" != "1" ] && [ "$ROUTER_SOURCE" = "llm-classifier" ]; then
+          echo -e "     \033[2m(2s to abort with Ctrl-C, or set ENSEMBLE_NO_ROUTE_PAUSE=1 to skip)\033[0m" >&2
+          sleep 2
+        fi
+      fi
+    fi
+  fi
+fi
 
 # ─── Resolve default agents from template (FUTURE-N primitive) ───
 # When the caller (skill / operator) didn't pre-decide AGENTS, look up the

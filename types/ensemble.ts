@@ -28,6 +28,10 @@ export interface EnsembleTeamAgent {
   status: 'spawning' | 'active' | 'idle' | 'done' | 'failed'
   worktreePath?: string
   worktreeBranch?: string
+  /** Total respawn attempts (initial + watchdog). Capped by ENSEMBLE_AUTO_RESPAWN_MAX (default 2). */
+  respawnCount?: number
+  /** ISO timestamp of most recent respawn — used for cooldown gating. */
+  lastRespawnAt?: string
 }
 
 export interface EnsembleTeamResult {

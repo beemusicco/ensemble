@@ -11,6 +11,7 @@ import {
   releaseOperatorHold,
 } from './services/ensemble-service'
 import { getTeam } from './lib/ensemble-registry'
+import { respawnAgent, type RespawnTrigger } from './lib/agent-respawn'
 import { verifyBearer, getAuthToken, getAuthTokenPath } from './lib/auth'
 import { logger } from './lib/logger'
 import { buildHealthReport } from './lib/health'
@@ -242,6 +243,33 @@ const server = http.createServer(async (req, res) => {
       const result = await disbandTeam(disbandMatch[1], 'manual: explicit disband endpoint', { triggeredBy: 'http-disband' })
       if (result.error) return json(res, { error: result.error }, result.status, origin)
       return json(res, result.data, result.status, origin)
+    }
+
+    // Respawn agent: /api/ensemble/teams/:id/agents/:name/respawn
+    // Body (optional): { reason?: 'manual'|'crash', maxAttempts?: number }
+    const respawnMatch = path.match(/^\/api\/ensemble\/teams\/([^/]+)\/agents\/([^/]+)\/respawn$/)
+    if (respawnMatch && method === 'POST') {
+      const teamId = respawnMatch[1]
+      const agentName = respawnMatch[2]
+      let body: Record<string, unknown> = {}
+      const raw = await readBody(req)
+      if (raw.trim()) {
+        try { body = JSON.parse(raw) } catch {
+          return json(res, { error: 'Bad Request: malformed JSON' }, 400, origin)
+        }
+      }
+      const team = getTeam(teamId)
+      if (!team) return json(res, { error: `team ${teamId} not found` }, 404, origin)
+      const reason = ((body.reason as string) || 'manual') as RespawnTrigger
+      const maxAttempts = typeof body.maxAttempts === 'number' ? body.maxAttempts : undefined
+      try {
+        const result = await respawnAgent(team, agentName, { reason, maxAttempts })
+        const status = result.success ? 200 : (result.reason === 'agent_not_found' ? 404 : 409)
+        return json(res, result, status, origin)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return json(res, { success: false, error: msg }, 500, origin)
+      }
     }
 
     // Explicit completion signal: /api/ensemble/teams/:id/signal-complete

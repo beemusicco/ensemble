@@ -10,23 +10,30 @@ import type { AgentProgram, AgentsConfig } from '../types/agent-program'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
-let _cache: AgentsConfig | null = null
-
-/** Load agents.json from repo root (cached after first read) */
+/**
+ * Load agents.json from repo root.
+ *
+ * Read FRESH per call — no in-memory cache. fs.readFileSync of a 5KB JSON
+ * is ~0.1ms; the cache previously saved that but caused correctness landmines:
+ *
+ * Production case 2026-05-09: codex-cli 0.129 deprecated --full-auto. We
+ * fixed agents.json (replaced with --dangerously-bypass-approvals-and-sandbox).
+ * Service had been running 9h with the OLD config cached in memory; ALL codex
+ * spawns kept using --full-auto and crashing despite the file edit. Required
+ * a service restart to pick up the change. Removing the cache eliminates this
+ * entire class of bug — future agents.json edits take effect immediately.
+ */
 export function loadAgentsConfig(): AgentsConfig {
-  if (_cache) return _cache
-
   const configPath = process.env['ENSEMBLE_AGENTS_CONFIG']
     || path.join(__dirname, '..', 'agents.json')
 
   const raw = fs.readFileSync(configPath, 'utf-8')
-  _cache = JSON.parse(raw) as AgentsConfig
-  return _cache
+  return JSON.parse(raw) as AgentsConfig
 }
 
-/** Clear cached config (useful for tests) */
+/** Backward-compat shim — cache no longer exists, but tests/scripts may still call this. */
 export function clearAgentsConfigCache(): void {
-  _cache = null
+  // no-op
 }
 
 /**

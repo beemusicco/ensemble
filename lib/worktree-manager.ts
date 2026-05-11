@@ -12,6 +12,30 @@ import { fileURLToPath } from 'url'
 const execFileAsync = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
+/**
+ * Wrap execGit(args, {cwd}) with a cwd existence pre-check.
+ *
+ * Production case 2026-05-10: when worktree was cleaned up but eval pass
+ * still ran on its old path, Node.js spawn() returned cryptic "spawn git
+ * ENOENT" — the actual cause was "cwd doesn't exist", not "git missing".
+ * 11 occurrences in 24h. Pre-check turns the same race into a clean error
+ * with the missing-path information.
+ */
+async function execGit(
+  args: readonly string[],
+  options: { cwd: string; encoding?: BufferEncoding } = { cwd: process.cwd() },
+): Promise<{ stdout: string; stderr: string }> {
+  if (options.cwd && !fs.existsSync(options.cwd)) {
+    const err: NodeJS.ErrnoException = new Error(
+      `git ${args[0] ?? '?'} skipped — cwd does not exist: ${options.cwd}`,
+    )
+    err.code = 'CWD_MISSING'
+    throw err
+  }
+  const { encoding = 'utf8', ...rest } = options
+  return execFileAsync('git', args as string[], { ...rest, encoding })
+}
+
 export interface WorktreeInfo {
   path: string
   branch: string
@@ -38,7 +62,7 @@ export async function createWorktree(
   fs.mkdirSync(path.dirname(worktreeDir), { recursive: true })
 
   // Create a new branch + worktree in one step
-  await execFileAsync('git', ['worktree', 'add', '-b', branch, worktreeDir], {
+  await execGit(['worktree', 'add', '-b', branch, worktreeDir], {
     cwd: basePath,
   })
 
@@ -50,7 +74,7 @@ export async function createWorktree(
     if (fs.existsSync(hooksDir) && fs.existsSync(path.join(hooksDir, 'pre-commit'))) {
       // Make sure pre-commit is executable (might be cleared by `cp` etc.)
       try { fs.chmodSync(path.join(hooksDir, 'pre-commit'), 0o755) } catch { /* non-fatal */ }
-      await execFileAsync('git', ['config', 'core.hooksPath', hooksDir], {
+      await execGit(['config', 'core.hooksPath', hooksDir], {
         cwd: worktreeDir,
       })
       console.log(`[Worktree] Wired core.hooksPath → ${hooksDir} for ${agentName}`)
@@ -347,12 +371,12 @@ export async function mergeWorktree(
       const conflicts = stdout.trim().split('\n').filter(Boolean)
 
       // Abort the failed merge
-      await execFileAsync('git', ['merge', '--abort'], { cwd: basePath })
+      await execGit(['merge', '--abort'], { cwd: basePath })
       return { success: false, conflicts }
     } catch {
       // If we can't even get conflicts, abort and report
       try {
-        await execFileAsync('git', ['merge', '--abort'], { cwd: basePath })
+        await execGit(['merge', '--abort'], { cwd: basePath })
       } catch { /* already clean */ }
       return { success: false, conflicts: ['unknown — merge aborted'] }
     }
@@ -397,7 +421,7 @@ interface EvaluateInput {
 async function resolveDefaultBranchRef(basePath: string): Promise<string | null> {
   for (const ref of ['main', 'master']) {
     try {
-      await execFileAsync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${ref}`], {
+      await execGit(['rev-parse', '--verify', '--quiet', `refs/heads/${ref}`], {
         cwd: basePath,
       })
       return ref
@@ -405,7 +429,7 @@ async function resolveDefaultBranchRef(basePath: string): Promise<string | null>
   }
   // Fallback to whatever HEAD points at in the parent repo (rare).
   try {
-    const { stdout } = await execFileAsync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: basePath })
+    const { stdout } = await execGit(['symbolic-ref', '--short', 'HEAD'], { cwd: basePath })
     return stdout.trim() || null
   } catch {
     return null
@@ -423,7 +447,7 @@ export async function evaluateWorktreeDisposition(input: EvaluateInput): Promise
   // Tier 2: uncommitted check.
   let porcelain = ''
   try {
-    const { stdout } = await execFileAsync('git', ['status', '--porcelain'], { cwd: worktreePath })
+    const { stdout } = await execGit(['status', '--porcelain'], { cwd: worktreePath })
     porcelain = stdout.trim()
   } catch (err) {
     // Can't even run git status — be conservative and preserve.
@@ -441,14 +465,14 @@ export async function evaluateWorktreeDisposition(input: EvaluateInput): Promise
   }
   let head = ''
   try {
-    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: worktreePath })
+    const { stdout } = await execGit(['rev-parse', 'HEAD'], { cwd: worktreePath })
     head = stdout.trim()
   } catch (err) {
     return { action: 'preserve', why: 'eval-error', detail: 'cannot resolve HEAD' }
   }
   try {
     // is-ancestor exits 0 if true, 1 if false, other if error
-    await execFileAsync('git', ['merge-base', '--is-ancestor', head, defaultRef], { cwd: basePath })
+    await execGit(['merge-base', '--is-ancestor', head, defaultRef], { cwd: basePath })
     // Exit 0 → HEAD is ancestor → fully merged → safe to destroy.
     return { action: 'destroy' }
   } catch (err) {
@@ -497,7 +521,7 @@ export async function destroyWorktree(
   deleteBranch = true,
 ): Promise<void> {
   try {
-    await execFileAsync('git', ['worktree', 'remove', worktreeInfo.path, '--force'], {
+    await execGit(['worktree', 'remove', worktreeInfo.path, '--force'], {
       cwd: basePath,
     })
     console.log(`[Worktree] Removed worktree at ${worktreeInfo.path}`)
@@ -510,13 +534,13 @@ export async function destroyWorktree(
     }
     // Prune stale worktree entries
     try {
-      await execFileAsync('git', ['worktree', 'prune'], { cwd: basePath })
+      await execGit(['worktree', 'prune'], { cwd: basePath })
     } catch { /* non-fatal */ }
   }
 
   if (deleteBranch) {
     try {
-      await execFileAsync('git', ['branch', '-D', worktreeInfo.branch], {
+      await execGit(['branch', '-D', worktreeInfo.branch], {
         cwd: basePath,
       })
       console.log(`[Worktree] Deleted branch ${worktreeInfo.branch}`)

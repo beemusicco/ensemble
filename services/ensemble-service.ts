@@ -16,6 +16,7 @@ import {
   postRemoteSessionCommand, isRemoteSessionReady,
   getAgentTokenUsage,
 } from '../lib/agent-spawner'
+import { spawnWithRetry, respawnAgent } from '../lib/agent-respawn'
 import { isSelf, getHostById, getSelfHostId } from '../lib/hosts-config'
 import { getRuntime } from '../lib/agent-runtime'
 import { resolveAgentProgram } from '../lib/agent-config'
@@ -516,13 +517,34 @@ class EnsembleService {
           updateTeam(team.id, {
             agents: team.agents.map(a => a.name === agent.name ? { ...a, status: 'failed' } : a),
           })
+
+          // T3: auto-respawn (env-gated, default OFF). Bounded by respawnCount/cooldown.
+          const autoRespawn = process.env.ENSEMBLE_AUTO_RESPAWN === '1'
+          let respawnNote = `manual respawn needed (POST /api/ensemble/teams/${team.id}/agents/${agent.name}/respawn or scripts/collab-respawn.sh).`
+          if (autoRespawn) {
+            const freshTeam = (await Promise.resolve(getTeam(team.id))) || team
+            try {
+              const result = await respawnAgent(freshTeam, agent.name, { reason: 'crash' })
+              if (result.success) {
+                respawnNote = `auto-respawn succeeded (attempt ${result.attempts}). Agent reading recent feed.`
+                // Allow future crash detection — respawn re-arms the marker.
+                this.crashedAgentMarkers.delete(markerKey)
+              } else {
+                respawnNote = `auto-respawn skipped/failed (${result.reason || 'unknown'}: ${result.error || 'n/a'}). Manual respawn available.`
+              }
+            } catch (err) {
+              const m = err instanceof Error ? err.message : String(err)
+              respawnNote = `auto-respawn threw (${m}). Manual respawn available.`
+            }
+          }
+
           appendMessage(team.id, {
             id: uuidv4(), teamId: team.id, from: 'ensemble', to: 'team',
-            content: `💀 ${agent.name} crashed — pane shows parent shell (${cmd}). The agent CLI exited (UserPromptSubmit hook error, OOM, or manual kill). Team continues with the other ${activeAgents.length - 1} agent(s); manual respawn needed if work depends on this role.`,
+            content: `💀 ${agent.name} crashed — pane shows parent shell (${cmd}). The agent CLI exited (UserPromptSubmit hook error, OOM, or manual kill). Team continues with the other ${activeAgents.length - 1} agent(s); ${respawnNote}`,
             type: 'chat', timestamp: new Date().toISOString(),
-            meta: { event: 'agent_crashed', agent: agent.name, foreground: cmd },
+            meta: { event: 'agent_crashed', agent: agent.name, foreground: cmd, auto_respawn: autoRespawn },
           })
-          console.warn(`[Ensemble] Agent crashed: team=${team.id.slice(0, 8)} agent=${agent.name} foreground=${cmd}`)
+          console.warn(`[Ensemble] Agent crashed: team=${team.id.slice(0, 8)} agent=${agent.name} foreground=${cmd}; ${respawnNote}`)
         }
       } catch { /* introspection failed — try next tick */ }
     }
@@ -811,6 +833,11 @@ export function loadCollabTemplate(templateName?: string): CollabTemplatesFile['
 const EXPERT_PROFILES_DIR = process.env['ENSEMBLE_EXPERT_PROFILES_DIR']
   ?? path.join(process.env['HOME'] ?? '', '.openclaw/context-profiles/experts')
 
+// Dedupe missing-expert warnings — same slug warns once per process, not per call.
+// Production case 2026-05-10: 95 'not found' warnings in 24h for 9 distinct
+// missing experts (kahneman, alan-kay, hofstadter, etc.). Set-dedupe trims log.
+const _missingExpertWarned = new Set<string>()
+
 export function loadExpertProfile(slug?: string): string | undefined {
   if (!slug) return undefined
   const safe = slug.replace(/[^a-z0-9._-]/gi, '')
@@ -819,7 +846,10 @@ export function loadExpertProfile(slug?: string): string | undefined {
   try {
     return fs.readFileSync(file, 'utf-8').trim()
   } catch {
-    console.warn(`[Ensemble] Expert profile not found: ${safe} (${file})`)
+    if (!_missingExpertWarned.has(safe)) {
+      _missingExpertWarned.add(safe)
+      console.warn(`[Ensemble] Expert profile not found: ${safe} (${file}) — silenced after first warning per process`)
+    }
     return undefined
   }
 }
@@ -2150,17 +2180,30 @@ async function createEnsembleTeamInner(
 
       if (isSelf(hostId)) {
         const agentCwd = worktreeMap.get(agentSpec.name)?.path || cwd
-        const spawned = await spawnLocalAgent({
-          name: agentName,
-          program: agentSpec.program,
-          workingDirectory: agentCwd,
-          hostId,
-        })
+        // T2: bounded retry-with-backoff (3 attempts, 2s/6s/18s) — most spawn
+        // failures are transient: codex trust prompt timeout, zsh history-expansion,
+        // tmux race. ~70% of past failures look retryable.
+        const spawned = await spawnWithRetry(
+          () => spawnLocalAgent({
+            name: agentName,
+            program: agentSpec.program,
+            workingDirectory: agentCwd,
+            hostId,
+          }),
+          { teamId: team.id, agentName: agentSpec.name, program: agentSpec.program },
+          3,
+          2000,
+        )
         agentId = spawned.id
       } else {
         const host = getHostById(hostId)
         if (!host) throw new Error(`Unknown host: ${hostId}`)
-        const remote = await spawnRemote(host.url, agentName, agentSpec.program, cwd, team.description, team.name)
+        const remote = await spawnWithRetry(
+          () => spawnRemote(host.url, agentName, agentSpec.program, cwd, team.description, team.name),
+          { teamId: team.id, agentName: agentSpec.name, program: agentSpec.program },
+          3,
+          2000,
+        )
         agentId = remote.id
       }
 
