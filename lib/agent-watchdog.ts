@@ -519,12 +519,34 @@ export class AgentWatchdog {
       if (Number.isNaN(nudgedMs) || nowMs - nudgedMs < this.stallAfterMs) continue
 
       console.warn(`[Watchdog] Agent ${agent.name} in team ${team.id} stalled after watchdog nudge`)
+      // Ground-truth enrichment (2026-05-13): the bare "stalled" message has
+      // historically been misread by autonomous Claude sessions as "agent
+      // dead" — they then propose disband without verifying. Include the
+      // available state fields PLUS an explicit verify-before-action note,
+      // so any reader has the data to avoid false-positive diagnoses.
+      const stallElapsedS = Math.round((nowMs - nudgedMs) / 1000)
+      const lastSeenAgo = currentState.lastMessageAt
+        ? Math.round((nowMs - new Date(currentState.lastMessageAt).getTime()) / 1000)
+        : null
+      const groundTruthLines = [
+        `⚠️ Watchdog marked ${agent.name} as stalled after ${stallElapsedS}s without progress after nudge`,
+        ``,
+        `[GROUND_TRUTH] last_seen_msg_age=${lastSeenAgo === null ? 'unknown' : lastSeenAgo + 's'}`,
+        `[GROUND_TRUTH] nudged_age=${stallElapsedS}s`,
+        `[GROUND_TRUTH] agent_status_in_registry=active (until force-disband)`,
+        ``,
+        `Before treating this as "agent dead" or proposing disband, VERIFY:`,
+        `  • curl -H "Authorization: Bearer $TOKEN" "$API/api/ensemble/teams/${team.id}" — check live agent statuses`,
+        `  • tail -20 /tmp/ensemble/${team.id}/messages.jsonl — agent may have just posted`,
+        `  • Long silence ≠ dead. Workers in worktrees commit + team-say only at milestones (WAVE pattern).`,
+        `  • False-positive stall is common when a real long-running command (pytest/build/llm call) is in flight; agent will recover and self-rebut.`,
+      ].join('\n')
       this.deps.appendMessage(team.id, {
         id: uuidv4(),
         teamId: team.id,
         from: 'ensemble',
         to: 'team',
-        content: `⚠️ Watchdog marked ${agent.name} as stalled after ${Math.round((nowMs - nudgedMs) / 1000)}s without progress after nudge`,
+        content: groundTruthLines,
         type: 'chat',
         timestamp: new Date(nowMs).toISOString(),
       })
