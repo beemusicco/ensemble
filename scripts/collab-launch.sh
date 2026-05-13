@@ -691,6 +691,25 @@ SUPERVISOR_PGID=$(ps -p "$SUPERVISOR_PID" -o pgid= 2>/dev/null | tr -d ' ')
 [ -n "$SUPERVISOR_PGID" ] && printf '%s\n' "$SUPERVISOR_PGID" > "$RUNTIME_DIR/.pgid"
 echo -e "  ${CHECK} Bridge started"
 
+# ─── 3b. SLOT_TABLE_v1 coordination layer ─────────────────────────────────
+# Two background processes per team:
+#   - collab-slot-watcher.sh: parses LEAD's [SLOT_TABLE_v1] message → writes
+#     /tmp/ensemble/<team>/slot-table.json which the PreToolUse hook reads
+#   - collab-slot-overlap-detector.sh: post-commit backstop that posts
+#     [SLOT_VIOLATION] when 2+ agents commit overlapping files in last 5m
+# Both honor ENSEMBLE_SLOT_BYPASS=1 (skip) and .finished marker (clean exit).
+# Production driver 2026-05-13: collab 0b945ff9 had 3 agents commit
+# overlapping scaffolds; soft "wait for plan" prompts weren't enforced.
+if [ "${ENSEMBLE_SLOT_BYPASS:-0}" != "1" ]; then
+  nohup "$SCRIPT_DIR/collab-slot-watcher.sh" "$TEAM_ID" \
+    >> "$RUNTIME_DIR/slot-watcher.log" 2>&1 &
+  printf '%s\n' "$!" > "$RUNTIME_DIR/slot-watcher.pid"
+  nohup "$SCRIPT_DIR/collab-slot-overlap-detector.sh" "$TEAM_ID" \
+    >> "$RUNTIME_DIR/slot-overlap.log" 2>&1 &
+  printf '%s\n' "$!" > "$RUNTIME_DIR/slot-overlap.pid"
+  echo -e "  ${CHECK} Slot coordination ${D}(watcher + overlap-detector)${R}"
+fi
+
 # ─── 4. Monitor ───
 # Monitor selection order (override via COLLAB_MONITOR=tmux|iterm|none):
 #   1. tmux split   — if already inside a tmux session

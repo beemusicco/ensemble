@@ -1842,6 +1842,58 @@ export function buildPromptPreview(params: {
     expertSlug = isLead ? 'robert-c-martin' : 'steve-mcconnell'
   }
 
+  // ─── SLOT_TABLE_v1 protocol (bulletproof coordination, 2026-05-13) ─────
+  // Production driver: collab 0b945ff9 had three agents commit overlapping
+  // scaffolds in parallel because role-prompts said "wait for plan" softly
+  // but no machine-parsable lock existed. Now: LEAD MUST publish a
+  // machine-parsable [SLOT_TABLE_v1] block; WORKERs MUST wait for it;
+  // PreToolUse hook (Claude/Sonnet) blocks out-of-slot Edit/Write/MultiEdit;
+  // post-commit overlap detector backstops codex. Bypass:
+  // ENSEMBLE_SLOT_BYPASS=1 in env (operator override).
+  const isLead = params.agentIndex === 0
+  const slotProtocolLead = [
+    `══════════════════════════════════════════════════════════════════════`,
+    `SLOT_TABLE_v1 PROTOCOL (mandatory for the LEAD — you):`,
+    `Before ANY worker starts tool use, you MUST publish a [SLOT_TABLE_v1] team-say message`,
+    `defining exclusive file-glob ownership per agent. Format:`,
+    ``,
+    `  [SLOT_TABLE_v1]`,
+    `  <agent-name>: <glob1>, <glob2>, ...`,
+    `  <agent-name>: <glob3>, <glob4>, ...`,
+    `  [END_SLOT_TABLE]`,
+    ``,
+    `Rules:`,
+    `  - Globs are gitignore-style; recursive uses /**`,
+    `  - NO two agents may have overlapping globs (parser will reject)`,
+    `  - At least 2 agents must be listed`,
+    `  - All currently-spawned agents should appear (omit only if intentionally idle)`,
+    `Workers WAIT for [SLOT_TABLE_v1] before any Bash/Edit/Write. If you defer`,
+    `publishing past your PLAN phase, you BLOCK them indefinitely.`,
+    `If scope changes mid-stream, REPOST [SLOT_TABLE_v1] (last valid wins).`,
+    `══════════════════════════════════════════════════════════════════════`,
+  ]
+  const slotProtocolWorker = [
+    `══════════════════════════════════════════════════════════════════════`,
+    `SLOT_TABLE_v1 PROTOCOL (mandatory for WORKERs — you):`,
+    `Before ANY Bash/Edit/Write/MultiEdit tool use, poll messages.jsonl for`,
+    `[SLOT_TABLE_v1] from the LEAD. Until present, your only allowed actions are`,
+    `reading files (Read tool) and posting team-say messages.`,
+    `Once SLOT_TABLE_v1 is in messages.jsonl, your tool use is CONSTRAINED to`,
+    `the file globs assigned to YOUR agent name. Out-of-slot Edit/Write will be`,
+    `REJECTED by the PreToolUse hook (Claude/Sonnet agents) or detected and`,
+    `flagged post-commit (codex agents). If your assigned scope is wrong, ask`,
+    `the LEAD to REPOST [SLOT_TABLE_v1] with corrected globs — do NOT silently`,
+    `edit outside your slot.`,
+    `Timeout: if no [SLOT_TABLE_v1] in 90s, post [SLOT_TIMEOUT] and idle.`,
+    `Bypass (operator only): export ENSEMBLE_SLOT_BYPASS=1`,
+    `══════════════════════════════════════════════════════════════════════`,
+  ]
+  roleInstructions = [
+    ...roleInstructions,
+    '',
+    ...(isLead ? slotProtocolLead : slotProtocolWorker),
+  ]
+
   const expertBody = loadExpertProfile(expertSlug)
   const expertBlock = expertBody
     ? `EXPERT MENTAL MODEL (${expertSlug}):\n${expertBody}\n---\nAdopt this expert's frameworks, questions, and operating beliefs while executing the role below.\n`
