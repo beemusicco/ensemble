@@ -464,7 +464,7 @@ detect_challenge_mode() {
 CHALLENGE_MODE="$(detect_challenge_mode "$TASK" "$TEMPLATE_NAME" "$CHALLENGE_OVERRIDE")"
 
 # ─── Colors ───
-G='\033[92m'; C='\033[96m'; D='\033[2m'; W='\033[97m'; BD='\033[1m'; R='\033[0m'
+G='\033[92m'; C='\033[96m'; D='\033[2m'; W='\033[97m'; BD='\033[1m'; R='\033[0m'; Y='\033[93m'; RED='\033[91m'
 CHECK="${G}✓${R}"
 SPIN="${C}●${R}"
 
@@ -512,6 +512,43 @@ if [ -n "$ACTIVE_TEAM" ]; then
     curl -sf -H "$AUTH_HDR" -X DELETE "$API/api/ensemble/teams/$ACTIVE_TEAM" > /dev/null 2>&1 || true
   fi
 fi
+
+# ─── 1d. Cross-cwd parallel guard ─────────────────────────────────────────
+# Block accidental parallel spawns when an active team exists in a different
+# working directory. Bypass with ENSEMBLE_PARALLEL_OK=1 for legitimate
+# different-project parallel work. Production driver 2026-05-13: agent saw
+# /tmp/collab-team-id.txt (global, last-spawn-wins) from a different project,
+# mis-identified it as "current task" team, then autonomously spawned a 2nd
+# parallel without surfacing options to operator.
+if [ "${ENSEMBLE_PARALLEL_OK:-0}" != "1" ]; then
+  OTHER_ACTIVE=$(curl -sf -H "$AUTH_HDR" "$API/api/ensemble/teams" 2>/dev/null | python3 -c "
+import json, sys, os
+cwd = os.path.realpath('$CWD')
+teams = json.load(sys.stdin).get('teams', [])
+others = [t for t in teams if t.get('status') in ('active','forming') and t.get('workingDirectory') != cwd]
+for t in others[:5]:
+    tid = (t.get('id') or '?')[:8]
+    other_cwd = (t.get('workingDirectory') or '?').rstrip('/').split('/')[-1]
+    print(f'  - {tid}.. cwd={other_cwd} status={t.get(\"status\")}')
+" 2>/dev/null || true)
+
+  if [ -n "$OTHER_ACTIVE" ]; then
+    echo -e "  ${Y}⚠${R} Active collab(s) in OTHER working directories:"
+    echo "$OTHER_ACTIVE"
+    echo ""
+    echo "  This spawn would create a parallel team. If that's intentional:"
+    echo "      ${BD}export ENSEMBLE_PARALLEL_OK=1${R} && retry the launch"
+    echo "  If you want to attach to an existing team:"
+    echo "      bash $SCRIPT_DIR/collab-resume.sh <team-id>"
+    echo "  If those teams are stuck/orphaned:"
+    echo "      bash $SCRIPT_DIR/collab-status.sh --once   # inspect"
+    echo "      curl -X DELETE -H \"\$AUTH_HDR\" \"\$API/api/ensemble/teams/<team-id>\"   # disband"
+    echo ""
+    echo -e "  ${RED}Refusing to spawn parallel by default. Set ENSEMBLE_PARALLEL_OK=1 to override.${R}"
+    exit 3
+  fi
+fi
+# ──────────────────────────────────────────────────────────────────────────
 
 # ─── 2. Create team (use env vars to avoid quoting hell) ───
 TEAM_NAME="collab-$(python3 -c 'import random,time; print(str(time.time_ns()//1000000)+"-"+str(random.randint(1000,9999)))')"
