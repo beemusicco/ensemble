@@ -487,6 +487,37 @@ else
   fi
 fi
 
+# ─── 1a-auth. Codex auth pre-flight ──────────────────────────────────────
+# Production driver 2026-05-14: codex refresh token expired silently;
+# 11/14 recent collabs shipped with codex agent in zombie state (registry
+# active, 0 messages). Pre-spawn check blocks waste — operator gets
+# actionable "run codex login" message instead of 35min phantom collab.
+# Bypass: ENSEMBLE_SKIP_AUTH_CHECK=1 (e.g. claude-only collab, codex not in
+# the team). Skip silently if agent list is provided + has no codex.
+if [ "${ENSEMBLE_SKIP_AUTH_CHECK:-0}" != "1" ]; then
+  # If explicit AGENTS list provided, only check codex if it's in there.
+  # Otherwise (template-driven), check anyway since templates often include codex.
+  CHECK_CODEX=true
+  if [ -n "${AGENTS:-}" ] && ! echo "$AGENTS" | grep -qiE 'codex'; then
+    CHECK_CODEX=false
+  fi
+  if [ "$CHECK_CODEX" = "true" ] && [ -x "$SCRIPT_DIR/../../../.openclaw/scripts/codex-auth-check.sh" -o -x "$HOME/.openclaw/scripts/codex-auth-check.sh" ]; then
+    AUTH_SCRIPT="$HOME/.openclaw/scripts/codex-auth-check.sh"
+    if ! "$AUTH_SCRIPT" >/dev/null 2>&1; then
+      echo -e "  ${Y}⚠${R} Codex auth check FAILED — collab would spawn codex agent in zombie state."
+      echo ""
+      echo "  Recommended fix:"
+      echo -e "      ${BD}codex logout && codex login${R}"
+      echo ""
+      echo "  After login completes, retry collab-launch."
+      echo "  Bypass (claude/sonnet-only collab): export ENSEMBLE_SKIP_AUTH_CHECK=1"
+      echo ""
+      echo -e "  ${RED}Refusing to spawn until codex auth is fresh.${R}"
+      exit 5
+    fi
+  fi
+fi
+
 # ─── 1b. Background cleanup of stale runtime dirs (>24h old) ───
 "$SCRIPT_DIR/collab-cleanup.sh" --force > /dev/null 2>&1 &
 
