@@ -55,6 +55,35 @@ finished_entries() {
     done | sort -rn
 }
 
+# Orphan entries: runtime dirs that NEVER reached .finished state (zombie test
+# spawns, agents that died before first message, collab-launch that errored).
+# Production driver 2026-05-15: 28+ ghost dirs from 2026-05-11 accumulated for
+# 4 days because finished_entries() only matched .finished marker — orphans
+# slipped through. Now caught: dir mtime >24h AND no .finished AND
+# (no messages.jsonl OR 0 messages).
+orphan_entries() {
+  [ -d "$ENSEMBLE_ROOT" ] || return 0
+  find "$ENSEMBLE_ROOT" -mindepth 1 -maxdepth 1 -type d -print0 |
+    while IFS= read -r -d '' runtime_dir; do
+      # Skip if .finished exists — handled by finished_entries()
+      [ -f "$runtime_dir/.finished" ] && continue
+      # Compute message count (treat missing file as 0)
+      local msg_file="$runtime_dir/messages.jsonl"
+      local msg_count=0
+      if [ -f "$msg_file" ]; then
+        msg_count=$(wc -l < "$msg_file" 2>/dev/null | tr -d ' ' || echo 0)
+      fi
+      msg_count=${msg_count:-0}
+      # Only target true orphans: zero messages = team never spoke
+      if [ "$msg_count" -ne 0 ] 2>/dev/null; then
+        continue
+      fi
+      local ts
+      ts="$(mtime_epoch "$runtime_dir")"
+      printf '%s\t%s\n' "$ts" "$runtime_dir"
+    done | sort -rn
+}
+
 for arg in "$@"; do
   case "$arg" in
     --force)
@@ -142,12 +171,56 @@ for idx in "${!ENTRIES[@]}"; do
   fi
 done
 
+# Orphan pass: zombie test spawns + crashed-at-start agents that never reached
+# .finished. Production driver 2026-05-15: 42 ghost dirs from 4 days ago.
+ORPHAN_ENTRIES=()
+while IFS= read -r line; do
+  ORPHAN_ENTRIES+=("$line")
+done < <(orphan_entries)
+
+ORPHAN_FOUND="${#ORPHAN_ENTRIES[@]}"
+ORPHAN_REMOVED=0
+ORPHAN_KEPT_FRESH=0
+ORPHAN_FAILED=0
+ORPHAN_KB=0
+
+for entry in "${ORPHAN_ENTRIES[@]}"; do
+  dir_mtime="${entry%%$'\t'*}"
+  runtime_dir="${entry#*$'\t'}"
+  runtime_name="$(basename "$runtime_dir")"
+  age_seconds=$((NOW - dir_mtime))
+  age_hours=$((age_seconds / 3600))
+  size_kb="$(du -sk "$runtime_dir" 2>/dev/null | awk '{print $1}')"
+  size_kb="${size_kb:-0}"
+
+  if [ "$age_seconds" -lt "$MIN_AGE_SECONDS" ]; then
+    ORPHAN_KEPT_FRESH=$((ORPHAN_KEPT_FRESH + 1))
+    continue
+  fi
+
+  if [ "$MODE" = "force" ]; then
+    if rm -rf "$runtime_dir"; then
+      ORPHAN_REMOVED=$((ORPHAN_REMOVED + 1))
+      ORPHAN_KB=$((ORPHAN_KB + size_kb))
+      echo -e "  ${G}orphan${R}  ${runtime_name} ${D}(no .finished, 0 msgs, ${age_hours}h old, $(human_kb "$size_kb"))${R}"
+    else
+      ORPHAN_FAILED=$((ORPHAN_FAILED + 1))
+    fi
+  else
+    ORPHAN_KB=$((ORPHAN_KB + size_kb))
+    echo -e "  ${Y}would rm orphan${R} ${runtime_name} ${D}(no .finished, ${age_hours}h, $(human_kb "$size_kb"))${R}"
+  fi
+done
+
 echo ""
 echo -e "  ${BD}Stats${R}"
 echo -e "  finished dirs:      ${TOTAL_FINISHED}"
 echo -e "  kept (latest 3):    ${PRESERVED_RECENT}"
 echo -e "  kept (<24h):        ${PRESERVED_FRESH}"
 echo -e "  eligible old dirs:  ${ELIGIBLE}"
+echo -e "  orphan dirs found:  ${ORPHAN_FOUND}"
+echo -e "  orphan removed:     ${ORPHAN_REMOVED}"
+echo -e "  orphan kept fresh:  ${ORPHAN_KEPT_FRESH}"
 if [ "$MODE" = "force" ]; then
   echo -e "  removed dirs:       ${REMOVED}"
   echo -e "  failed removals:    ${FAILED}"
