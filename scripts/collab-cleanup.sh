@@ -157,6 +157,9 @@ for idx in "${!ENTRIES[@]}"; do
 
   ELIGIBLE=$((ELIGIBLE + 1))
   if [ "$MODE" = "force" ]; then
+    # Preserve the decision trail (summary + messages + replay) before the
+    # ephemeral runtime dir is destroyed. runtime_name is the team-id UUID.
+    bash "$SCRIPT_DIR/collab-archive.sh" "$runtime_name" >/dev/null 2>&1 || true
     if rm -rf "$runtime_dir"; then
       REMOVED=$((REMOVED + 1))
       REMOVED_KB=$((REMOVED_KB + size_kb))

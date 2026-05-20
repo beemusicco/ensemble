@@ -28,6 +28,59 @@ for arg in "$@"; do
   esac
 done
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# A collab worktree belongs to a team whose lifecycle status is authoritative
+# in ~/.ensemble/ensemble/teams.json. A disbanded/failed/completed team's
+# worktree is disposable regardless of git state: agents routinely leave
+# uncommitted build cruft and their branches get grafted/squashed rather than
+# fast-forwarded, so the git-state-only check (evaluate_disposition) preserved
+# ~everything and the GC reclaimed nothing. An active/forming team's worktree
+# is left untouched. A team not in the registry falls back to the git check.
+TEAMS_JSON="$HOME/.ensemble/ensemble/teams.json"
+declare -A TEAM_STATUS
+if [ -f "$TEAMS_JSON" ]; then
+  while IFS=$'\t' read -r _tid _status; do
+    [ -n "$_tid" ] && TEAM_STATUS["$_tid"]="$_status"
+  done < <(python3 -c '
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for rec in (data if isinstance(data, list) else []):
+    if isinstance(rec, dict) and rec.get("id"):
+        print(rec["id"] + "\t" + (rec.get("status") or "unknown"))
+' "$TEAMS_JSON" 2>/dev/null)
+fi
+
+# .worktrees/<uuid>-<agent> → <uuid>  (empty if the dir is not collab-shaped)
+team_id_from_worktree() {
+  basename "$1" | grep -oE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' || true
+}
+
+# Path-substring exemptions: a worktree whose absolute path contains any
+# pattern in worktree-gc-exempt.txt is never GC'd, regardless of team status
+# or git state. FUTURE-N: add a line to that file to protect a new location.
+EXEMPT_FILE="$SCRIPT_DIR/../worktree-gc-exempt.txt"
+EXEMPT_PATTERNS=()
+if [ -f "$EXEMPT_FILE" ]; then
+  while IFS= read -r _line; do
+    _line="${_line%%#*}"
+    _line="$(printf '%s' "$_line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [ -n "$_line" ] && EXEMPT_PATTERNS+=("$_line")
+  done < "$EXEMPT_FILE"
+fi
+
+is_exempt() {
+  local path="$1" pat
+  for pat in "${EXEMPT_PATTERNS[@]:-}"; do
+    [ -z "$pat" ] && continue
+    case "$path" in *"$pat"*) return 0 ;; esac
+  done
+  return 1
+}
+
 # Discover all `.worktrees` directories under known scan roots. The repo
 # root for each is resolved via `git rev-parse --show-toplevel` from inside,
 # because some monorepo skills nest `.worktrees/` inside a subdir whose
@@ -101,7 +154,17 @@ for parent_dir in "${WORKTREE_PARENTS[@]}"; do
   for wt in "$parent_dir/.worktrees"/*/; do
       [ -d "$wt" ] || continue
       wt="${wt%/}"
-      verdict=$(evaluate_disposition "$wt" "$repo")
+      if is_exempt "$wt"; then
+        verdict="preserve:exempt"
+      else
+        tid=$(team_id_from_worktree "$wt")
+        if [ -n "$tid" ]; then tstatus="${TEAM_STATUS[$tid]:-}"; else tstatus=""; fi
+        case "$tstatus" in
+          active|forming)              verdict="preserve:team-active" ;;
+          disbanded|finished|completed|failed) verdict="archive-destroy" ;;
+          *)                           verdict=$(evaluate_disposition "$wt" "$repo") ;;
+        esac
+      fi
       size_bytes=$(du -sk "$wt" 2>/dev/null | awk '{print $1}')
       size_human=$(du -sh "$wt" 2>/dev/null | cut -f1)
       branch=""
@@ -123,6 +186,34 @@ for parent_dir in "${WORKTREE_PARENTS[@]}"; do
           fi
           DESTROYED_COUNT=$((DESTROYED_COUNT + 1))
           ;;
+        archive-destroy)
+          if [ "$APPLY" = "1" ]; then
+            # Preserve the collab history + any uncommitted work first.
+            bash "$SCRIPT_DIR/collab-archive.sh" "$tid" --worktree "$wt" >/dev/null 2>&1 || true
+            # Delete the branch ref only when its commits already merged into
+            # the default branch; otherwise keep the ref so the commits stay
+            # recoverable (the bulky worktree dir is what we are reclaiming).
+            branch_merged=0
+            if [ -n "$branch" ]; then
+              dref=$(resolve_default_branch "$repo" || true)
+              whead=$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)
+              if [ -n "$dref" ] && [ -n "$whead" ] && \
+                 git -C "$repo" merge-base --is-ancestor "$whead" "$dref" 2>/dev/null; then
+                branch_merged=1
+              fi
+            fi
+            git -C "$repo" worktree remove "$wt" --force >/dev/null 2>&1 || rm -rf "$wt"
+            if [ -n "$branch" ] && [ "$branch_merged" = "1" ]; then
+              git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || true
+            fi
+            git -C "$repo" worktree prune >/dev/null 2>&1 || true
+            action="archived+destroyed"
+            RECLAIMED_BYTES=$((RECLAIMED_BYTES + size_bytes))
+          else
+            action="would-archive+destroy"
+          fi
+          DESTROYED_COUNT=$((DESTROYED_COUNT + 1))
+          ;;
         preserve:*)
           action="preserved (${verdict#preserve:})"
           PRESERVED_COUNT=$((PRESERVED_COUNT + 1))
@@ -136,6 +227,9 @@ for parent_dir in "${WORKTREE_PARENTS[@]}"; do
       else
         case "$verdict" in
           destroy) icon="💀" ;;
+          archive-destroy) icon="📦" ;;
+          preserve:exempt) icon="🔒" ;;
+          preserve:team-active) icon="🟢" ;;
           preserve:uncommitted) icon="📝" ;;
           preserve:commits-not-merged) icon="🌳" ;;
           *) icon="⚠️" ;;

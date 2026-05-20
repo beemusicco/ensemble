@@ -1,0 +1,14 @@
+# worktree-gc exemption list.
+#
+# A collab worktree whose absolute path contains ANY substring listed below
+# is never garbage-collected by worktree-gc.sh — it is reported as
+# preserve:exempt and left untouched, regardless of team status or git state.
+#
+# One plain substring per line. Lines starting with # and blank lines ignored.
+# FUTURE-N: protect a new location by adding a line here — no code change.
+
+# crypto-trading-platform + data worktrees hold ~17 GB each of nested
+# experiment data (plo-bot/runs, tcg-price-tracker/data). Operator decision
+# 2026-05-20: keep them until reviewed. Remove these two lines to release.
+workspace/skills/crypto-trading-platform/.worktrees/
+workspace/skills/data/.worktrees/
