@@ -26,7 +26,7 @@ import { sendTelegramMessage, getTelegramToken } from './telegram-out'
 import { findTags } from './tag-parser'
 
 const QUESTION_BODY_MAX = 600
-const DEFAULT_TIMEOUT_MS = 5 * 60_000  // 5 minutes per W3 spec
+const DEFAULT_TIMEOUT_MS = 120 * 60_000  // 2 hours — operator works async (was 5min/W3 spec; 0/23 reply rate proved 5min unrealistic)
 
 interface PendingQuestion {
   questionId: string  // short, used as the /answer correlation token
