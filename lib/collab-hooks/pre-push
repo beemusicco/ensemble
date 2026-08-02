@@ -1,0 +1,20 @@
+#!/bin/sh
+# Refuse to publish a credential that is already in history.
+#
+# Repos wired to this directory (worktree-manager sets core.hooksPath here) do
+# not see the machine-wide dispatcher at ~/.openclaw/scripts/git-hooks, and a
+# local hooksPath wins — so without this file nine repos could push a key that
+# the pre-commit gate never had a chance to stop, because it was committed
+# before that gate existed.
+#
+# Scans what the push would ACTUALLY send. On a first push that is the whole
+# history it is about to publish, which is the case that matters: the credential
+# is usually older than the decision to push.
+set -e
+
+SCAN="$HOME/.openclaw/scripts/secret-scan.py"
+if [ ! -f "$SCAN" ]; then
+  echo "pre-push: $SCAN missing — refusing to push unscanned" >&2
+  exit 1
+fi
+exec python3 "$SCAN" --pre-push --remote "$1" --repo "$(git rev-parse --show-toplevel)"
