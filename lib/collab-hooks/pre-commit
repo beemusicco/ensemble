@@ -17,6 +17,21 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 [ -z "$REPO_ROOT" ] && exit 0  # not a git repo (shouldn't happen pre-commit)
 
+# ── secret scan (runs FIRST — a leaked credential outranks everything) ───
+# Lives here, not in .git/hooks/pre-commit, because setting core.hooksPath makes
+# git ignore .git/hooks ENTIRELY. On 2026-08-02 the secret gate was installed as
+# .git/hooks/pre-commit in five repos and was silently dead in the two that
+# point here; a planted AWS key committed cleanly. worktree-manager.ts re-points
+# hooksPath at this directory for every new collab worktree, so this file is the
+# only location the gate survives in.
+SECRET_SCAN="$HOME/.openclaw/scripts/secret-scan.py"
+if [ -f "$SECRET_SCAN" ]; then
+  python3 "$SECRET_SCAN" --staged --repo "$REPO_ROOT" >&2 || exit 1
+else
+  echo "pre-commit: $SECRET_SCAN missing — refusing to commit unscanned" >&2
+  exit 1
+fi
+
 # ── self-recursion guard (runs FIRST, independent of .collab-protect) ────
 # Detects the "wrap-and-rename" class bug where a refactor's replace_all
 # captures the function's own body. See ~/.openclaw/scripts/check-self-recursion.mjs.
