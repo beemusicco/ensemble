@@ -13,8 +13,19 @@
 set -e
 
 SCAN="$HOME/.openclaw/scripts/secret-scan.py"
+# shellcheck source=_hook-python.sh
+. "$(dirname "$0")/_hook-python.sh"
 if [ ! -f "$SCAN" ]; then
   echo "pre-push: $SCAN missing — refusing to push unscanned" >&2
   exit 1
 fi
-exec python3 "$SCAN" --pre-push --remote "$1" --repo "$(git rev-parse --show-toplevel)"
+REFS="$(cat)"   # both gates need git's ref lines; hold them once
+# Machine-side branch protection (same gate as the machine-wide dispatcher —
+# this local hooksPath shadows it, so it must carry the call too).
+if [ -f "$HOME/.openclaw/scripts/push-gate.py" ]; then
+  printf '%s\n' "$REFS" |
+    hook_python "$HOME/.openclaw/scripts/push-gate.py" \
+      --repo "$(git rev-parse --show-toplevel)" >&2 || exit 1
+fi
+printf '%s\n' "$REFS" |
+  hook_python "$SCAN" --pre-push --remote "$1" --repo "$(git rev-parse --show-toplevel)"

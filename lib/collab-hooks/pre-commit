@@ -25,8 +25,10 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 # hooksPath at this directory for every new collab worktree, so this file is the
 # only location the gate survives in.
 SECRET_SCAN="$HOME/.openclaw/scripts/secret-scan.py"
+# shellcheck source=_hook-python.sh
+. "$(dirname "$0")/_hook-python.sh"
 if [ -f "$SECRET_SCAN" ]; then
-  python3 "$SECRET_SCAN" --staged --repo "$REPO_ROOT" >&2 || exit 1
+  hook_python "$SECRET_SCAN" --staged --repo "$REPO_ROOT" >&2 || exit 1
 else
   echo "pre-commit: $SECRET_SCAN missing — refusing to commit unscanned" >&2
   exit 1
