@@ -39,9 +39,16 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 # Called on every path this script ALLOWS and never after it refuses: the
 # gates above still decide first, and delegation runs only once they passed.
 # git passes a pre-commit hook no arguments, so none are forwarded.
+# The `|| true` is the same idiom REPO_ROOT uses two screens up, and it is
+# load-bearing here: `local own` is its own statement, so the assignment below
+# is a plain command whose status is rev-parse's, and under `set -e` a failing
+# rev-parse would abort the HOOK — turning "I could not find the delegate" into
+# a refused commit. Measured from a non-git directory: rc=128 without it. An
+# empty answer then leaves own="/hooks/pre-commit", which the -x test rejects,
+# so the fallthrough is the old exit-0 behaviour rather than a bogus delegate.
 delegate_and_exit() {
   local own
-  own="$(git rev-parse --git-common-dir 2>/dev/null)/hooks/pre-commit"
+  own="$(git rev-parse --git-common-dir 2>/dev/null || true)/hooks/pre-commit"
   if [ -x "$own" ]; then
     exec "$own"
   fi
